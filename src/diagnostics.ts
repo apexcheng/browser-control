@@ -34,6 +34,8 @@ export class Diagnostics {
     this.consoleByPage.set(pageId, []);
     this.networkByPage.set(pageId, []);
 
+    page.once("close", () => this.remove(page, pageId));
+
     page.on("console", (message) => {
       const events = this.consoleByPage.get(pageId);
       if (events) pushBounded(events, { at: new Date().toISOString(), type: message.type(), text: clipped(message.text()) });
@@ -110,6 +112,19 @@ export class Diagnostics {
       arm.resolve(info);
     } catch (error) {
       arm.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private remove(page: Page, pageId: string) {
+    this.consoleByPage.delete(pageId);
+    this.networkByPage.delete(pageId);
+    this.dialogByPage.delete(pageId);
+
+    const arm = this.dialogArms.get(page);
+    if (arm) {
+      this.dialogArms.delete(page);
+      clearTimeout(arm.timer);
+      arm.reject(new Error(`Page ${pageId} closed while waiting for dialog`));
     }
   }
 }

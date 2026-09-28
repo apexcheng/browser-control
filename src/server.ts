@@ -18,7 +18,11 @@ function toolResult(value: unknown) {
 }
 
 function createMcpServer() {
-  const server = new McpServer({ name: "browser-control", version: "1.0.0-p1" });
+  const server = new McpServer({
+    name: "macmini-browser",
+    title: "Mac mini Browser",
+    version: "1.0.0-p1",
+  });
 
   server.registerTool("browser_status", {
     description: "Inspect runtime status without starting Chrome",

@@ -11,6 +11,8 @@ import type { BatchAction, LocatorSpec, TriggerAction } from "./schema.js";
 
 const execFileAsync = promisify(execFile);
 const ownerFile = path.join(config.runtimeDir, "owner.json");
+const failureDiagnosticsTimeoutMs = 2_000;
+const failureDiagnosticsFocusTimeoutMs = 300;
 
 type DiagnosticOptions = {
   on_error?: boolean;
@@ -36,6 +38,8 @@ export class BrowserRuntime {
   private readonly pages = new PageRegistry();
   private readonly diagnostics = new Diagnostics();
   private readonly busyPages = new Set<string>();
+  private readonly mutatingPages = new Set<string>();
+  private contextMutation = false;
 
   async status() {
     return {
@@ -58,19 +62,30 @@ export class BrowserRuntime {
     }
 
     if (level === "page") {
+      this.assertNoContextMutation();
       const { id, page } = await this.requirePage(pageRef);
-      await page.reload({ waitUntil: "domcontentloaded", timeout: config.navigationTimeoutMs });
-      return { ok: true, level, page: id, url: page.url() };
+      this.beginPageMutation(id);
+      try {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: config.navigationTimeoutMs });
+        return { ok: true, level, page: id, url: page.url() };
+      } finally {
+        this.mutatingPages.delete(id);
+      }
     }
 
-    if (level === "hard") {
-      await this.stopContext({ timeoutMs: 1500, force: true });
-      await this.clearChromeProfileLocks();
-    } else {
-      await this.stopContext({ timeoutMs: 5000 });
+    this.beginContextMutation(`browser_reset(${level})`);
+    try {
+      if (level === "hard") {
+        await this.stopContext({ timeoutMs: 1500, force: true });
+        await this.clearChromeProfileLocks();
+      } else {
+        await this.stopContext({ timeoutMs: 5000 });
+      }
+      await this.ensureContext();
+      return { ok: true, level, pages: await this.pages.list() };
+    } finally {
+      this.contextMutation = false;
     }
-    await this.ensureContext();
-    return { ok: true, level, pages: await this.pages.list() };
   }
 
   async pageList() {
@@ -94,9 +109,15 @@ export class BrowserRuntime {
   }
 
   async pageClose(pageRef: string) {
+    this.assertNoContextMutation();
     const { id, page } = await this.requirePage(pageRef);
-    await page.close({ runBeforeUnload: false });
-    return { ok: true, page: id };
+    this.beginPageMutation(id);
+    try {
+      await page.close({ runBeforeUnload: false });
+      return { ok: true, page: id };
+    } finally {
+      this.mutatingPages.delete(id);
+    }
   }
 
   async pageAlias(pageRef: string, alias: string) {
@@ -123,9 +144,9 @@ export class BrowserRuntime {
 
   async batch(input: BatchInput) {
     if (input.actions.length > config.maxActions) throw new Error(`At most ${config.maxActions} actions are allowed`);
+    this.assertNoContextMutation();
     const selected = await this.requirePage(input.page);
-    if (this.busyPages.has(selected.id)) throw new Error(`Page ${selected.id} is already running another browser_batch`);
-    this.busyPages.add(selected.id);
+    this.beginBatch(selected.id);
     try {
     const totalTimeout = input.timeout_ms ?? config.batchTimeoutMs;
     const defaultActionTimeout = input.action_timeout_ms ?? config.actionTimeoutMs;
@@ -178,12 +199,20 @@ export class BrowserRuntime {
       ...(ok ? {} : { failed_step: failedStep }),
     };
     if (!ok && input.diagnostics?.on_error !== false) {
-      output.diagnostics = await this.failureDiagnostics(
-        selected.id,
-        selected.page,
-        input.actions[failedStep!],
-        input.diagnostics ?? {},
-      );
+      try {
+        output.diagnostics = await withTimeout(
+          this.failureDiagnostics(
+            selected.id,
+            selected.page,
+            input.actions[failedStep!],
+            input.diagnostics ?? {},
+          ),
+          failureDiagnosticsTimeoutMs,
+          `Failure diagnostics timed out after ${failureDiagnosticsTimeoutMs}ms`,
+        );
+      } catch (error) {
+        output.diagnostics = { unavailable: true, error: errorText(error) };
+      }
     }
     return output;
     } finally {
@@ -192,7 +221,37 @@ export class BrowserRuntime {
   }
 
   async shutdown() {
-    await this.stopContext();
+    this.beginContextMutation("shutdown");
+    try {
+      await this.stopContext();
+    } finally {
+      this.contextMutation = false;
+    }
+  }
+
+  private assertNoContextMutation() {
+    if (this.contextMutation) throw new Error("Browser context lifecycle operation is in progress");
+  }
+
+  private beginBatch(pageId: string) {
+    this.assertNoContextMutation();
+    if (this.mutatingPages.has(pageId)) throw new Error(`Page ${pageId} is undergoing a lifecycle operation`);
+    if (this.busyPages.has(pageId)) throw new Error(`Page ${pageId} is already running another browser_batch`);
+    this.busyPages.add(pageId);
+  }
+
+  private beginPageMutation(pageId: string) {
+    this.assertNoContextMutation();
+    if (this.busyPages.has(pageId)) throw new Error(`Page ${pageId} is running browser_batch`);
+    if (this.mutatingPages.has(pageId)) throw new Error(`Page ${pageId} is already undergoing a lifecycle operation`);
+    this.mutatingPages.add(pageId);
+  }
+
+  private beginContextMutation(operation: string) {
+    if (this.contextMutation) throw new Error(`Cannot ${operation}: another browser context lifecycle operation is in progress`);
+    if (this.busyPages.size > 0) throw new Error(`Cannot ${operation} while browser_batch is running`);
+    if (this.mutatingPages.size > 0) throw new Error(`Cannot ${operation} while a page lifecycle operation is running`);
+    this.contextMutation = true;
   }
 
   private async ensureContext() {
@@ -211,6 +270,7 @@ export class BrowserRuntime {
     try {
       const context = await chromium.launchPersistentContext(config.profileDir, {
         channel: config.channel,
+        chromiumSandbox: true,
         headless: config.headless,
         viewport: null,
         acceptDownloads: true,
@@ -371,26 +431,30 @@ export class BrowserRuntime {
   }
 
   private async failureDiagnostics(pageId: string, page: Page, action: BatchAction, options: DiagnosticOptions) {
-    const focus = await page.evaluate(() => {
-      const element = document.activeElement as HTMLElement | null;
-      const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element : null;
-      return {
-        active_element: element ? {
-          tag: element.tagName.toLowerCase(),
-          id: element.id || null,
-          class: typeof element.className === "string" ? element.className.slice(0, 500) : null,
-          role: element.getAttribute("role"),
-          aria_label: element.getAttribute("aria-label"),
-        } : null,
-        selection: input ? {
-          start: input.selectionStart,
-          end: input.selectionEnd,
-          text: input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0).slice(0, 2_000),
-        } : {
-          text: (window.getSelection()?.toString() ?? "").slice(0, 2_000),
-        },
-      };
-    }).catch(() => ({ active_element: null, selection: null }));
+    const focus = await withTimeout(
+      page.evaluate(() => {
+        const element = document.activeElement as HTMLElement | null;
+        const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element : null;
+        return {
+          active_element: element ? {
+            tag: element.tagName.toLowerCase(),
+            id: element.id || null,
+            class: typeof element.className === "string" ? element.className.slice(0, 500) : null,
+            role: element.getAttribute("role"),
+            aria_label: element.getAttribute("aria-label"),
+          } : null,
+          selection: input ? {
+            start: input.selectionStart,
+            end: input.selectionEnd,
+            text: input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0).slice(0, 2_000),
+          } : {
+            text: (window.getSelection()?.toString() ?? "").slice(0, 2_000),
+          },
+        };
+      }),
+      failureDiagnosticsFocusTimeoutMs,
+      `Failure diagnostics focus timed out after ${failureDiagnosticsFocusTimeoutMs}ms`,
+    ).catch(() => ({ active_element: null, selection: null }));
     const details: Record<string, unknown> = {
       operation: action.op,
       target: actionTarget(action),
@@ -431,7 +495,6 @@ export class BrowserRuntime {
     this.context = undefined;
     this.pages.reset();
     this.diagnostics.reset();
-    this.busyPages.clear();
     if (context) {
       const closed = await settlesWithin(context.close(), timeoutMs);
       if (!closed && !force) {

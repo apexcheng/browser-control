@@ -2,9 +2,12 @@
 
 Thin persistent browser runtime policy for local Agent automation.
 
+ChatGPT-facing MCP name: `macmini-browser`. The repository, runtime service,
+profile, and launchd label remain `browser-control` internally.
+
 ```text
 Agent
-  -> browser-control MCP (Streamable HTTP)
+  -> macmini-browser MCP (browser-control runtime, Streamable HTTP)
   -> thin Runtime Policy Layer
   -> Playwright native API
   -> dedicated Google Chrome persistent context

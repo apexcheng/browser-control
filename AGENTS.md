@@ -2,10 +2,13 @@
 
 This repository is the standalone browser-control infrastructure.
 
+The ChatGPT-facing MCP identity is `macmini-browser`; `browser-control` remains
+the internal repository/runtime/service name.
+
 P1 is intentionally a thin runtime policy layer over Playwright native APIs:
 
 ```text
-Agent -> browser-control -> Runtime Policy -> Playwright -> Dedicated Chrome
+Agent -> macmini-browser -> browser-control Runtime Policy -> Playwright -> Dedicated Chrome
 ```
 
 - Playwright owns generic browser behavior. Do not mirror the Playwright API or Playwright MCP tool surface.
