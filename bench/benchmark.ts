@@ -3,171 +3,287 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const endpoint = process.env.BROWSER_CONTROL_MCP_URL ?? "http://127.0.0.1:8766/mcp";
-const fixturePort = Number(process.env.BROWSER_CONTROL_FIXTURE_PORT ?? 18767);
-const fixtureUrl = `http://127.0.0.1:${fixturePort}/`;
+const fixturePort = Number(process.env.BROWSER_CONTROL_FIXTURE_PORT ?? 0);
 
 const fixture = `<!doctype html>
-<html><head><meta charset="utf-8"><title>browser-control benchmark</title></head>
+<html><head><meta charset="utf-8"><title>browser-control P1 fixture</title></head>
 <body>
-  <button id="inc" onclick="document.querySelector('#count').textContent=String(Number(document.querySelector('#count').textContent)+1)">increment</button>
+  <button id="inc" onclick="count.textContent=String(Number(count.textContent)+1)">increment</button>
   <span id="count">0</span>
   <input id="input" value="alpha beta" />
-  <button id="dialog" onclick="setTimeout(() => confirm('benchmark-confirm'), 0)">dialog</button>
-  <div id="drag-a" style="position:absolute;left:20px;top:160px;width:30px;height:30px;background:#ccc"></div>
-  <div id="drag-b" style="position:absolute;left:240px;top:160px;width:30px;height:30px;background:#ddd"></div>
-  <div style="height:2200px"></div>
-  <div id="bottom">bottom</div>
-  <script>
-    window.addEventListener('beforeunload', e => { if (window.blockUnload) { e.preventDefault(); e.returnValue = ''; } });
-  </script>
+  <button id="dialog" onclick="confirm('p1-confirm')">dialog</button>
+  <button id="api" onclick="fetch('/api/data', {method:'POST'}).then(r => r.json()).then(v => apiResult.textContent=v.ok)">api</button>
+  <button id="slow" onclick="fetch('/api/slow', {method:'POST'})">slow</button>
+  <span id="apiResult"></span>
+  <div id="drag-a" draggable="true">A</div><div id="drag-b">B</div>
 </body></html>`;
 
 const fixtureServer = createServer((req, res) => {
-  if (req.url === "/favicon.ico") { res.writeHead(204).end(); return; }
+  if (req.url === "/favicon.ico") return void res.writeHead(204).end();
+  if (req.url === "/api/data") {
+    res.setHeader("content-type", "application/json");
+    return void res.end(JSON.stringify({ ok: "yes", source: "fixture" }));
+  }
+  if (req.url === "/api/slow") {
+    res.setHeader("content-type", "application/json");
+    setTimeout(() => res.end(JSON.stringify({ ok: true })), 250);
+    return;
+  }
   res.setHeader("content-type", "text/html; charset=utf-8");
   res.end(fixture);
 });
 
 await new Promise<void>((resolve) => fixtureServer.listen(fixturePort, "127.0.0.1", resolve));
+const fixtureAddress = fixtureServer.address();
+if (!fixtureAddress || typeof fixtureAddress === "string") throw new Error("Unable to resolve fixture port");
+const fixtureUrl = `http://127.0.0.1:${fixtureAddress.port}/`;
 
-const client = new Client({ name: "browser-control-benchmark", version: "0.1.0" });
+const client = new Client({ name: "browser-control-p1-benchmark", version: "1" });
 await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
-
-type Metric = { name: string; samples_ms: number[]; p50_ms: number; p95_ms: number; total_ms: number };
-const metrics: Metric[] = [];
+const stage = (name: string) => console.error(`[bench] ${name}`);
 
 async function call(name: string, args: Record<string, unknown> = {}) {
-  const result: any = await client.callTool({ name, arguments: args });
-  const structured = result.structuredContent as { result?: unknown } | undefined;
-  if (structured && "result" in structured) return structured.result;
-  const text = result.content.find((item: any) => item.type === "text");
-  return text && text.type === "text" ? JSON.parse(text.text) : result;
+  const response: any = await client.callTool({ name, arguments: args });
+  const structured = response.structuredContent as { result?: unknown } | undefined;
+  if (structured && "result" in structured) return structured.result as any;
+  const text = response.content.find((item: any) => item.type === "text");
+  return text ? JSON.parse(text.text) : response;
 }
 
 async function timed<T>(fn: () => Promise<T>) {
   const started = performance.now();
   const value = await fn();
-  return { value, ms: performance.now() - started };
+  return { value, ms: round(performance.now() - started) };
 }
 
-async function sample(name: string, count: number, fn: () => Promise<unknown>) {
-  const samples: number[] = [];
-  for (let i = 0; i < count; i++) {
-    const { ms } = await timed(fn);
-    samples.push(ms);
-  }
-  const sorted = [...samples].sort((a, b) => a - b);
-  const percentile = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))];
-  metrics.push({
-    name,
-    samples_ms: samples.map(round),
-    p50_ms: round(percentile(0.5)),
-    p95_ms: round(percentile(0.95)),
-    total_ms: round(samples.reduce((a, b) => a + b, 0)),
-  });
-}
+const toolNames = (await client.listTools()).tools.map((tool) => tool.name).sort();
+const expectedTools = [
+  "browser_batch", "browser_reset", "browser_status", "clipboard_read", "clipboard_write",
+  "page_alias", "page_close", "page_create", "page_list",
+].sort();
 
-const connect = await timed(() => call("browser_start"));
-metrics.push({ name: "browser_start_existing_chrome", samples_ms: [round(connect.ms)], p50_ms: round(connect.ms), p95_ms: round(connect.ms), total_ms: round(connect.ms) });
-
+const before = await call("browser_status");
+stage("lazy status");
 await call("page_create", { alias: "bench", url: fixtureUrl });
+const afterLaunch = await call("browser_status");
+stage("page created");
 
-await sample("mcp_status", 10, () => call("browser_status"));
-await sample("page_eval", 20, () => call("eval", { page: "bench", expression: "() => document.title.length" }));
-
-await call("eval", { page: "bench", expression: "() => { document.querySelector('#count').textContent = '0'; }" });
-await sample("click_separate_10", 10, () => call("click", { page: "bench", target: "#inc" }));
-
-await call("eval", { page: "bench", expression: "() => { document.querySelector('#count').textContent = '0'; }" });
-const batchClicks = await timed(() => call("browser_batch", {
+const separate20 = await timed(async () => {
+  for (let i = 0; i < 20; i++) {
+    const result = await call("browser_batch", { page: "bench", actions: [{ op: "evaluate", expression: "1" }] });
+    if (!result.ok) throw new Error("single-step batch failed");
+  }
+});
+const batch20 = await timed(() => call("browser_batch", {
   page: "bench",
-  actions: Array.from({ length: 10 }, () => ({ op: "click", target: "#inc" })),
+  actions: Array.from({ length: 20 }, () => ({ op: "evaluate", expression: "1" })),
 }));
-metrics.push({ name: "click_batch_10", samples_ms: [round(batchClicks.ms)], p50_ms: round(batchClicks.ms), p95_ms: round(batchClicks.ms), total_ms: round(batchClicks.ms) });
+stage("batch performance");
 
-await call("eval", { page: "bench", expression: "() => { document.querySelector('#count').textContent = '0'; }" });
-const batchFastClicks = await timed(() => call("browser_batch", {
+const stability100 = await timed(() => call("browser_batch", {
   page: "bench",
-  actions: Array.from({ length: 10 }, () => ({ op: "click", target: "#inc", force: true, no_wait_after: true })),
+  actions: Array.from({ length: 100 }, () => ({ op: "evaluate", expression: "1" })),
+  timeout_ms: 30_000,
 }));
-metrics.push({ name: "click_batch_10_fast", samples_ms: [round(batchFastClicks.ms)], p50_ms: round(batchFastClicks.ms), p95_ms: round(batchFastClicks.ms), total_ms: round(batchFastClicks.ms) });
 
-await sample("dom_count_separate_100", 100, () => call("count", { page: "bench", target: "#inc" }));
-const batchDom = await timed(() => call("browser_batch", {
+const clicks = await call("browser_batch", {
   page: "bench",
-  actions: Array.from({ length: 100 }, () => ({ op: "count", target: "#inc" })),
-  timeout_ms: 30000,
-}));
-metrics.push({ name: "dom_count_batch_100", samples_ms: [round(batchDom.ms)], p50_ms: round(batchDom.ms), p95_ms: round(batchDom.ms), total_ms: round(batchDom.ms) });
+  actions: [
+    ...Array.from({ length: 10 }, () => ({ op: "click", target: "#inc" })),
+    { op: "text", target: "#count" },
+  ],
+});
+stage("basic actions");
 
-await sample("clipboard_system_write_read", 5, async () => {
-  await call("clipboard_write", { page: "bench", mode: "system", text: "browser-control-benchmark" });
-  const value = await call("clipboard_read", { page: "bench", mode: "system" });
-  if (!JSON.stringify(value).includes("browser-control-benchmark")) throw new Error("clipboard mismatch");
+const responseWait = await call("browser_batch", {
+  page: "bench",
+  actions: [{
+    op: "wait_response",
+    url_contains: "/api/data",
+    method: "POST",
+    body: "json",
+    trigger: { op: "click", target: "#api" },
+  }],
 });
 
-await call("clipboard_write", { page: "bench", mode: "browser", text: "browser-api-benchmark" });
-const browserClipboard = await call("clipboard_read", { page: "bench", mode: "browser" });
-
-await call("page_create", { alias: "bench2", url: fixtureUrl });
-await sample("page_switch", 20, async () => {
-  await call("page_use", { page: "bench" });
-  await call("page_use", { page: "bench2" });
-});
-
-const stability = await call("browser_batch", {
+const dialog = await call("browser_batch", {
   page: "bench",
-  actions: Array.from({ length: 100 }, () => ({ op: "eval", expression: "() => 1" })),
-  timeout_ms: 30000,
+  actions: [{
+    op: "dialog",
+    action: "accept",
+    trigger: { op: "click", target: "#dialog" },
+  }],
 });
-
-await call("local_storage", { page: "bench", action: "set", key: "browser-control", value: "ok" });
-const localStorageValue = await call("local_storage", { page: "bench", action: "get", key: "browser-control" });
+stage("response + dialog");
 
 await call("browser_batch", {
   page: "bench",
   actions: [
-    { op: "eval", expression: "() => { setTimeout(() => confirm('benchmark-confirm'), 0); return true; }" },
-    { op: "wait", ms: 50 },
-    { op: "dialog_accept" },
+    { op: "fill", target: "#input", text: "alpha beta" },
+    { op: "press", target: "#input", key: "Meta+A" },
+    { op: "press", target: "#input", key: "Meta+C" },
   ],
-  timeout_ms: 5000,
 });
+const metaCopy = await call("clipboard_read", { mode: "system" });
+stage("meta copy");
 
-await call("reload", { page: "bench" });
 await call("browser_batch", {
   page: "bench",
   actions: [
-    { op: "scroll_into_view", target: "#bottom" },
-    { op: "drag", from: "#drag-a", to: "#drag-b", steps: 5 },
-    { op: "focus", target: "#input" },
-    { op: "press", key: "Meta+A" },
-    { op: "press", key: "Meta+C" },
+    { op: "press", target: "#input", key: "Meta+A" },
+    { op: "press", target: "#input", key: "Meta+X" },
   ],
 });
-const copied = await call("clipboard_read", { page: "bench", mode: "system" });
+const metaCut = await call("clipboard_read", { mode: "system" });
+const cutValue = await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "evaluate", expression: "document.querySelector('#input').value" }],
+});
+stage("meta cut");
+
+await call("clipboard_write", { mode: "system", text: "pasted-value" });
+const pasteValue = await call("browser_batch", {
+  page: "bench",
+  actions: [
+    { op: "press", target: "#input", key: "Meta+A" },
+    { op: "press", target: "#input", key: "Meta+V" },
+    { op: "evaluate", expression: "document.querySelector('#input').value" },
+  ],
+});
+stage("meta paste");
+
+await call("clipboard_write", { mode: "browser", page: "bench", text: "browser-api", grant_permission: true });
+const browserClipboard = await call("clipboard_read", { mode: "browser", page: "bench", grant_permission: true });
+stage("browser clipboard");
 
 const missing = await call("browser_batch", {
   page: "bench",
   actions: [{ op: "click", target: "#does-not-exist", timeout_ms: 150 }],
-  diagnostics: { on_error: true, dom: true, screenshot: false },
+  diagnostics: { on_error: true, console: true, network: true, screenshot: false },
 });
 
-const screenshot = await call("screenshot", { page: "bench", full_page: false });
+const batchTimeout = await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "wait_for", target: "#never-exists", timeout_ms: 5000 }],
+  timeout_ms: 50,
+});
+
+const slowBatch = call("browser_batch", {
+  page: "bench",
+  actions: [{
+    op: "wait_response",
+    url_contains: "/api/slow",
+    method: "POST",
+    trigger: { op: "click", target: "#slow" },
+  }],
+});
+await new Promise((resolve) => setTimeout(resolve, 25));
+const busyResponse: any = await client.callTool({
+  name: "browser_batch",
+  arguments: { page: "bench", actions: [{ op: "evaluate", expression: "1" }] },
+});
+await slowBatch;
+const busyError = busyResponse.content?.find((item: any) => item.type === "text")?.text ?? "";
+stage("error diagnostics");
+
+const screenshot = await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "screenshot", name: "p1-benchmark.png" }],
+});
+stage("screenshot");
+
+const aliasBefore = await call("page_list");
+await call("page_create", { alias: "reference", url: fixtureUrl });
+const aliasAfter = await call("page_list");
+const benchId = aliasAfter.find((page: any) => page.aliases.includes("bench"))?.id;
+await call("page_close", { page: "reference" });
+const aliasAfterClose = await call("page_list");
+stage("stable aliases");
+
+const softReset = await call("browser_reset", { level: "soft" });
+const pageReset = await call("browser_reset", { level: "page", page: "bench" });
+const profileCookieBefore = await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "evaluate", expression: "document.cookie.includes('browser-control-p1=persisted')" }],
+});
+await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "evaluate", expression: "document.cookie = 'browser-control-p1=persisted; Path=/; Max-Age=86400'" }],
+});
+const profileMarkerBefore = await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "evaluate", expression: "localStorage.getItem('browser-control-p1-marker')" }],
+});
+await call("browser_batch", {
+  page: "bench",
+  actions: [{ op: "evaluate", expression: "localStorage.setItem('browser-control-p1-marker', 'persisted')" }],
+});
+const beforeContext = await call("browser_status");
+const contextReset = await call("browser_reset", { level: "context" });
+const afterContext = await call("browser_status");
+await call("page_create", { alias: "after-context", url: fixtureUrl });
+const markerAfterContext = await call("browser_batch", {
+  page: "after-context",
+  actions: [{ op: "evaluate", expression: "localStorage.getItem('browser-control-p1-marker')" }],
+});
+const hardReset = await call("browser_reset", { level: "hard" });
+const afterHard = await call("browser_status");
+await call("page_create", { alias: "after-hard", url: fixtureUrl });
+const markerAfterHard = await call("browser_batch", {
+  page: "after-hard",
+  actions: [{ op: "evaluate", expression: "localStorage.getItem('browser-control-p1-marker')" }],
+});
+stage("resets");
 
 console.log(JSON.stringify({
   generated_at: new Date().toISOString(),
   endpoint,
-  fixture_url: fixtureUrl,
-  metrics,
+  tools: {
+    count: toolNames.length,
+    exact_p1_surface: JSON.stringify(toolNames) === JSON.stringify(expectedTools),
+    names: toolNames,
+  },
+  lifecycle: {
+    lazy_before_running: before.running,
+    launch_count_after_first_page: afterLaunch.launch_count,
+    launch_count_before_context_reset: beforeContext.launch_count,
+    launch_count_after_context_reset: afterContext.launch_count,
+    launch_count_after_hard_reset: afterHard.launch_count,
+    context_reset: contextReset.ok,
+    hard_reset: hardReset.ok,
+  },
+  performance_ms: {
+    twenty_single_action_batches: separate20.ms,
+    one_twenty_action_batch: batch20.ms,
+    one_hundred_action_batch: stability100.ms,
+  },
   checks: {
-    stability_100_actions_ok: (stability as any)?.ok === true,
-    local_storage_ok: JSON.stringify(localStorageValue).includes("ok"),
-    real_meta_c_system_clipboard: copied,
-    browser_clipboard_api: browserClipboard,
-    missing_locator_failed_step: (missing as any)?.failed_step,
-    missing_locator_has_diagnostics: Boolean((missing as any)?.diagnostics),
-    screenshot,
+    stability_100_actions_ok: stability100.value.ok === true && stability100.value.results.length === 100,
+    ten_clicks_then_text: clicks.results.at(-1)?.value,
+    wait_response_json: responseWait.results[0]?.value?.body,
+    dialog_accept: dialog.results[0]?.value,
+    meta_copy_system_clipboard: metaCopy.text,
+    meta_cut_system_clipboard: metaCut.text,
+    meta_cut_emptied_input: cutValue.results[0]?.value,
+    meta_paste_input: pasteValue.results.at(-1)?.value,
+    browser_clipboard_api: browserClipboard.text,
+    failed_step: missing.failed_step,
+    batch_timeout_failed_step: batchTimeout.failed_step,
+    batch_timeout_error: batchTimeout.results?.[0]?.error,
+    same_page_concurrent_batch_rejected: busyResponse.isError === true,
+    same_page_concurrent_batch_error: busyError,
+    failure_diagnostics: missing.diagnostics,
+    screenshot: screenshot.results[0]?.value,
+    stable_alias_id_before_reorder: benchId,
+    alias_lists_before_second_page: aliasBefore,
+    alias_lists_after_second_page: aliasAfter,
+    alias_lists_after_close: aliasAfterClose,
+    soft_reset: softReset.ok,
+    page_reset: pageReset.ok,
+    profile_cookie_before: profileCookieBefore.results?.[0]?.value ?? false,
+    profile_marker_before: profileMarkerBefore.results?.[0]?.value ?? null,
+    profile_marker_after_context_reset: markerAfterContext.results?.[0]?.value ?? null,
+    profile_marker_after_hard_reset: markerAfterHard.results?.[0]?.value ?? null,
   },
 }, null, 2));
 
@@ -177,4 +293,3 @@ await new Promise<void>((resolve) => fixtureServer.close(() => resolve()));
 function round(value: number) {
   return Math.round(value * 10) / 10;
 }
-

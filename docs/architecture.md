@@ -1,37 +1,92 @@
-# Architecture
+# Architecture — P1
 
-## Decision
-
-browser-control uses a single long-running Node process for both the MCP server and Playwright Controller.
+## Boundary
 
 ```text
-MCP client
-  -> Streamable HTTP
-  -> browser-control
-     -> BrowserController
-     -> PageRegistry
-     -> BatchExecutor
-     -> Diagnostics
-     -> Playwright Browser (kept in memory)
-  -> CDP :19313
-  -> dedicated Chrome profile
+Agent
+  -> browser-control MCP
+  -> BrowserRuntime / PageRegistry / bounded diagnostics
+  -> Playwright native API
+  -> Google Chrome persistent context
 ```
 
-There is no second internal daemon in P0. Adding one would add latency and lifecycle complexity without improving isolation for the normal action path.
+browser-control owns runtime policy only. Playwright owns navigation, locators, mouse/keyboard input, dialogs, screenshots, network events, and page-context evaluation.
 
-## Page identity
+The Node MCP process is the only controller process. There is no internal daemon and no CLI/browser-agent fallback.
 
-Pages receive stable ids such as `p_0001`. Optional aliases (`app`, `reference`, `admin`) map to page ids and never depend on Chrome tab order.
+## Dedicated Chrome
 
-## Batch
+The runtime lazily creates exactly one Playwright persistent context using Google Chrome (`channel: chrome`) and `~/browser-control/chrome-profile`. The context remains in memory and is reused for all actions until a reset or process shutdown.
 
-`browser_batch` executes a bounded DSL directly inside the Controller. It returns per-step results, the failed step index, and diagnostics. It does not add unconditional post-action sleeps.
+An owner lock under `~/browser-control/runtime` prevents two browser-control processes from owning the same profile. Chrome itself also rejects concurrent use of one user-data directory.
 
-## Script execution
+No CDP endpoint is part of P1. The runtime does not connect or reconnect per action.
 
-P0 does not expose arbitrary Playwright/Node code execution. Page-context `eval` is available, but Controller-process RCE is not. A future high-level runner should remain a controlled DSL or run unsafe code in a killable worker process.
+## Stable pages
+
+Each Playwright Page receives a process-stable id such as `p_0001`. Aliases such as `app`, `reference`, or `admin` map to ids. Tab order is never an identity. Closing a page removes aliases that point to it.
+
+## MCP surface
+
+P1 exposes exactly nine tools:
+
+1. `browser_status`
+2. `browser_reset`
+3. `page_list`
+4. `page_create`
+5. `page_close`
+6. `page_alias`
+7. `browser_batch`
+8. `clipboard_read`
+9. `clipboard_write`
+
+There are no single-action click/fill/evaluate tools and no start/stop/page-use tools.
+
+## Batch DSL
+
+`browser_batch` accepts 1–100 actions and executes them in the same long-running process/context. P1 actions are:
+
+- `goto`
+- `click`
+- `dblclick`
+- `fill`
+- `press`
+- `hover`
+- `drag`
+- `wait_for`
+- `text`
+- `attr`
+- `count`
+- `evaluate`
+- `screenshot`
+- `dialog`
+- `wait_response`
+- `clipboard`
+
+There is no unconditional sleep action. `dialog` and `wait_response` take a bounded trigger action so the waiter is installed before the triggering operation.
+
+Targets are a thin mapping to Playwright native locators: selector strings plus `getByRole`, `getByText`, `getByLabel`, and `getByTestId`. browser-control does not maintain element refs or a snapshot engine.
+
+Each batch has a total timeout and each step has an effective timeout capped by the remaining batch budget. `stop_on_error` defaults to true. Results contain per-step duration/value/error and `failed_step` when applicable.
+
+`evaluate` executes only in the page JavaScript context. It never runs JavaScript in the Node controller process.
+
+## Reset semantics
+
+- `soft`: reconcile PageRegistry with current context pages and clear bounded transient diagnostics. No navigation or browser restart.
+- `page`: reload one target page while preserving its page id and aliases.
+- `context`: gracefully close and relaunch the persistent context with the same profile. Page ids are rebuilt.
+- `hard`: bound the graceful close attempt, force-stop any remaining Chrome processes using the browser-control profile, remove stale runtime ownership plus Chrome `Singleton*` profile locks, and relaunch with the same profile.
+
+Concurrent `browser_batch` calls may run on different pages, but a second batch targeting the same stable page id is rejected while the first is active. This prevents multi-client action interleaving without introducing a scheduler or queue.
+
+The profile is never deleted by reset, so persistent login state remains a profile concern.
+
+## Diagnostics
+
+For each page, browser-control keeps only the latest 40 console events and 40 network events, with message/URL fields truncated. Batch failures always include operation, target summary, current URL, page id/aliases, active element/selection, and latest dialog metadata. Console/network excerpts are returned only when requested. Error screenshots are opt-in and always written below `~/browser-control/artifacts`; only the newest 50 artifacts are retained.
 
 ## Clipboard
 
-The Controller distinguishes browser Clipboard API operations from the macOS system clipboard. Real `Meta+C/V/X` is exercised through Playwright keyboard input and can be combined with system clipboard reads/writes in one batch.
+System clipboard uses macOS `pbcopy` / `pbpaste`. Browser clipboard uses `navigator.clipboard` in the selected page. Real `Meta+C`, `Meta+V`, and `Meta+X` are sent by Playwright keyboard input; reading/writing the system clipboard is a distinct operation.
 

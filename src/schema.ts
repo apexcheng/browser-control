@@ -1,74 +1,77 @@
 import { z } from "zod";
 
+const timeoutMs = z.number().int().positive().max(60_000).optional();
+
 export const locatorSpecSchema = z.union([
   z.string().min(1),
-  z.object({ selector: z.string().min(1) }),
-  z.object({ text: z.string().min(1), exact: z.boolean().optional() }),
-  z.object({ role: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional() }),
-  z.object({ label: z.string().min(1), exact: z.boolean().optional() }),
-  z.object({ testId: z.string().min(1) }),
+  z.object({ by: z.literal("role"), role: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional() }),
+  z.object({ by: z.literal("text"), text: z.string(), exact: z.boolean().optional() }),
+  z.object({ by: z.literal("label"), text: z.string(), exact: z.boolean().optional() }),
+  z.object({ by: z.literal("testId"), value: z.string().min(1) }),
 ]);
 
 export type LocatorSpec = z.infer<typeof locatorSpecSchema>;
 
-export const pointSchema = z.object({ x: z.number(), y: z.number() });
-export type Point = z.infer<typeof pointSchema>;
+const gotoAction = z.object({
+  op: z.literal("goto"),
+  url: z.string().url(),
+  wait_until: z.enum(["commit", "domcontentloaded", "load", "networkidle"]).default("domcontentloaded"),
+  timeout_ms: timeoutMs,
+});
+const clickAction = z.object({ op: z.literal("click"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const dblclickAction = z.object({ op: z.literal("dblclick"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const fillAction = z.object({ op: z.literal("fill"), target: locatorSpecSchema, text: z.string(), timeout_ms: timeoutMs });
+const pressAction = z.object({ op: z.literal("press"), key: z.string().min(1), target: locatorSpecSchema.optional(), timeout_ms: timeoutMs });
+const hoverAction = z.object({ op: z.literal("hover"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const dragAction = z.object({ op: z.literal("drag"), from: locatorSpecSchema, to: locatorSpecSchema, timeout_ms: timeoutMs });
+const waitForAction = z.object({
+  op: z.literal("wait_for"),
+  target: locatorSpecSchema,
+  state: z.enum(["attached", "detached", "visible", "hidden"]).default("visible"),
+  timeout_ms: timeoutMs,
+});
+const textAction = z.object({ op: z.literal("text"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const attrAction = z.object({ op: z.literal("attr"), target: locatorSpecSchema, name: z.string().min(1), timeout_ms: timeoutMs });
+const countAction = z.object({ op: z.literal("count"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const evaluateAction = z.object({ op: z.literal("evaluate"), expression: z.string().min(1).max(20_000), timeout_ms: timeoutMs });
+const screenshotAction = z.object({
+  op: z.literal("screenshot"),
+  full_page: z.boolean().default(false),
+  name: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/).optional(),
+  timeout_ms: timeoutMs,
+});
+const clipboardAction = z.object({
+  op: z.literal("clipboard"),
+  action: z.enum(["read", "write"]),
+  mode: z.enum(["system", "browser"]).default("system"),
+  text: z.string().optional(),
+  grant_permission: z.boolean().default(false),
+  timeout_ms: timeoutMs,
+}).refine((value) => value.action !== "write" || value.text !== undefined, "clipboard write requires text");
 
-export const targetSchema = z.union([locatorSpecSchema, pointSchema]);
-export type Target = z.infer<typeof targetSchema>;
+export const triggerActionSchema = z.discriminatedUnion("op", [gotoAction, clickAction, dblclickAction, fillAction, pressAction, evaluateAction]);
 
-const actionBase = {
-  timeout_ms: z.number().int().positive().optional(),
-};
-
-const responseTriggerSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("navigate"), url: z.string().min(1), wait_until: z.enum(["commit", "domcontentloaded", "load", "networkidle"]).optional(), ...actionBase }),
-  z.object({ op: z.literal("click"), target: locatorSpecSchema, button: z.enum(["left", "right", "middle"]).optional(), force: z.boolean().optional(), no_wait_after: z.boolean().optional(), ...actionBase }),
-  z.object({ op: z.literal("press"), key: z.string().min(1), target: locatorSpecSchema.optional(), ...actionBase }),
-  z.object({ op: z.literal("eval"), expression: z.string().min(1), arg: z.any().optional(), ...actionBase }),
-]);
+const dialogAction = z.object({
+  op: z.literal("dialog"),
+  action: z.enum(["accept", "dismiss"]),
+  prompt_text: z.string().optional(),
+  trigger: triggerActionSchema,
+  timeout_ms: timeoutMs,
+});
+const waitResponseAction = z.object({
+  op: z.literal("wait_response"),
+  url_contains: z.string().min(1),
+  method: z.string().min(1).optional(),
+  body: z.enum(["none", "text", "json"]).default("none"),
+  trigger: triggerActionSchema,
+  timeout_ms: timeoutMs,
+});
 
 export const batchActionSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("navigate"), url: z.string().min(1), wait_until: z.enum(["commit", "domcontentloaded", "load", "networkidle"]).optional(), ...actionBase }),
-  z.object({ op: z.literal("reload"), wait_until: z.enum(["commit", "domcontentloaded", "load", "networkidle"]).optional(), ...actionBase }),
-  z.object({ op: z.literal("click"), target: locatorSpecSchema, button: z.enum(["left", "right", "middle"]).optional(), force: z.boolean().optional(), no_wait_after: z.boolean().optional(), ...actionBase }),
-  z.object({ op: z.literal("dblclick"), target: locatorSpecSchema, button: z.enum(["left", "right", "middle"]).optional(), force: z.boolean().optional(), no_wait_after: z.boolean().optional(), ...actionBase }),
-  z.object({ op: z.literal("fill"), target: locatorSpecSchema, value: z.string(), ...actionBase }),
-  z.object({ op: z.literal("focus"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("press"), key: z.string().min(1), target: locatorSpecSchema.optional(), ...actionBase }),
-  z.object({ op: z.literal("hover"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("wait"), ms: z.number().int().nonnegative().max(30000) }),
-  z.object({ op: z.literal("wait_for"), target: locatorSpecSchema, state: z.enum(["attached", "detached", "visible", "hidden"]).optional(), ...actionBase }),
-  z.object({ op: z.literal("scroll_into_view"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("scroll"), dx: z.number().default(0), dy: z.number().default(0) }),
-  z.object({ op: z.literal("mouse_move"), x: z.number(), y: z.number(), steps: z.number().int().positive().max(100).optional() }),
-  z.object({ op: z.literal("mouse_down"), button: z.enum(["left", "right", "middle"]).optional() }),
-  z.object({ op: z.literal("mouse_up"), button: z.enum(["left", "right", "middle"]).optional() }),
-  z.object({ op: z.literal("drag"), from: targetSchema, to: targetSchema, steps: z.number().int().positive().max(100).optional(), ...actionBase }),
-  z.object({ op: z.literal("text"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("html"), target: locatorSpecSchema.optional(), ...actionBase }),
-  z.object({ op: z.literal("attr"), target: locatorSpecSchema, name: z.string().min(1), ...actionBase }),
-  z.object({ op: z.literal("count"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("bounding_box"), target: locatorSpecSchema, ...actionBase }),
-  z.object({ op: z.literal("screenshot"), full_page: z.boolean().optional() }),
-  z.object({ op: z.literal("eval"), expression: z.string().min(1), arg: z.any().optional(), ...actionBase }),
-  z.object({
-    op: z.literal("wait_response"),
-    url_contains: z.string().min(1),
-    method: z.string().optional(),
-    body: z.enum(["json", "text", "none"]).default("json"),
-    trigger: responseTriggerSchema,
-    ...actionBase,
-  }),
-  z.object({ op: z.literal("local_storage_get"), key: z.string() }),
-  z.object({ op: z.literal("local_storage_set"), key: z.string(), value: z.string() }),
-  z.object({ op: z.literal("local_storage_remove"), key: z.string() }),
-  z.object({ op: z.literal("local_storage_clear") }),
-  z.object({ op: z.literal("clipboard_read"), mode: z.enum(["browser", "system"]).default("system"), grant_permission: z.boolean().optional() }),
-  z.object({ op: z.literal("clipboard_write"), mode: z.enum(["browser", "system"]).default("system"), text: z.string(), grant_permission: z.boolean().optional() }),
-  z.object({ op: z.literal("dialog_accept"), prompt_text: z.string().optional() }),
-  z.object({ op: z.literal("dialog_dismiss") }),
+  gotoAction, clickAction, dblclickAction, fillAction, pressAction, hoverAction, dragAction,
+  waitForAction, textAction, attrAction, countAction, evaluateAction, screenshotAction,
+  dialogAction, waitResponseAction, clipboardAction,
 ]);
 
 export type BatchAction = z.infer<typeof batchActionSchema>;
-
+export type TriggerAction = z.infer<typeof triggerActionSchema>;
