@@ -20,7 +20,9 @@ Agent -> browser-control -> Runtime Policy -> Playwright -> Dedicated Chrome
 - System clipboard means real macOS `pbcopy` / `pbpaste`; browser Clipboard API is a separate mode.
 - The dedicated Chrome profile, artifacts, locks, logs, screenshots, sockets, and PIDs are runtime state and must never be committed.
 - Identify and clean browser-control Chrome processes by the dedicated `--user-data-dir=<browser-control profile>`, not by generic Chrome process counts or broad `pgrep Chrome` matching. Renderer/GPU/utility helpers are not extra browser instances, and unrelated user Chrome processes must never be killed.
+- Do not treat Playwright's `--remote-debugging-pipe` as legacy CDP exposure. Legacy-CDP residue means an externally reachable/debuggable port such as `--remote-debugging-port=...`, a listening debug port, or an old daemon/wrapper reconnecting over CDP.
 - `context` / `hard` reset must preserve the persistent profile; never delete the profile as a recovery shortcut. After either reset, callers must reacquire pages and aliases instead of assuming old page ids or aliases still identify the same page.
+- Runtime lifecycle mutations must not race an active batch on the affected page/context. Do not reset context/hard, close the active page, or shut down the runtime while a `browser_batch` is still executing; serialize lifecycle operations with in-flight browser work.
 - Runtime validation should assert observable semantics, not incidental implementation details: verify timeout plus subsequent recovery rather than exact error wording, verify the dedicated owner/browser rather than helper-process counts, and verify reset/profile/page identity behavior rather than requiring specific PID changes.
 - Do not add business-system-specific behavior to the core.
 - `browser-agent`, Playwright CLI fallback, compatibility shims, and alternate Chrome runtimes are explicitly out of scope.
