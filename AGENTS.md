@@ -16,9 +16,12 @@ Agent -> browser-control -> Runtime Policy -> Playwright -> Dedicated Chrome
 - Use stable page ids / aliases; never expose tab index as durable identity.
 - Multi-step work goes through `browser_batch`; do not add single-action MCP tools unless a real runtime requirement proves necessary.
 - Every batch and action must be bounded. Diagnostics and console/network history must also be bounded.
-- Page `evaluate` is page-context JavaScript only. Never expose Controller-process Node execution.
+- Page `evaluate` is page-context JavaScript only. Never expose Controller-process Node execution. Keep evaluated JavaScript short and guaranteed to terminate; do not use infinite loops, long polling, or never-settling promises. An outer timeout does not guarantee page-side JavaScript was cancelled.
 - System clipboard means real macOS `pbcopy` / `pbpaste`; browser Clipboard API is a separate mode.
 - The dedicated Chrome profile, artifacts, locks, logs, screenshots, sockets, and PIDs are runtime state and must never be committed.
+- Identify and clean browser-control Chrome processes by the dedicated `--user-data-dir=<browser-control profile>`, not by generic Chrome process counts or broad `pgrep Chrome` matching. Renderer/GPU/utility helpers are not extra browser instances, and unrelated user Chrome processes must never be killed.
+- `context` / `hard` reset must preserve the persistent profile; never delete the profile as a recovery shortcut. After either reset, callers must reacquire pages and aliases instead of assuming old page ids or aliases still identify the same page.
+- Runtime validation should assert observable semantics, not incidental implementation details: verify timeout plus subsequent recovery rather than exact error wording, verify the dedicated owner/browser rather than helper-process counts, and verify reset/profile/page identity behavior rather than requiring specific PID changes.
 - Do not add business-system-specific behavior to the core.
 - `browser-agent`, Playwright CLI fallback, compatibility shims, and alternate Chrome runtimes are explicitly out of scope.
 
