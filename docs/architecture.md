@@ -88,5 +88,5 @@ For each page, browser-control keeps only the latest 40 console events and 40 ne
 
 ## Clipboard
 
-System clipboard uses macOS `pbcopy` / `pbpaste`. Browser clipboard uses `navigator.clipboard` in the selected page. Real `Meta+C`, `Meta+V`, and `Meta+X` are sent by Playwright keyboard input; reading/writing the system clipboard is a distinct operation.
+System clipboard uses the native platform clipboard (`pbcopy` / `pbpaste` on macOS and PowerShell clipboard APIs on Windows). Browser clipboard uses `navigator.clipboard` in the selected page. Real platform shortcuts are sent by Playwright keyboard input (`Meta` on macOS, `Control` on Windows); reading/writing the system clipboard is a distinct operation.
 

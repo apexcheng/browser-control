@@ -11,6 +11,8 @@ export const config = {
   runtimeDir: process.env.BROWSER_CONTROL_RUNTIME_DIR ?? path.join(rootDir, "runtime"),
   artifactDir: process.env.BROWSER_CONTROL_ARTIFACT_DIR ?? path.join(rootDir, "artifacts"),
   channel: process.env.BROWSER_CONTROL_CHANNEL ?? "chrome",
+  mcpName: process.env.BROWSER_CONTROL_MCP_NAME ?? (process.platform === "win32" ? "windows-browser" : "macmini-browser"),
+  mcpTitle: process.env.BROWSER_CONTROL_MCP_TITLE ?? (process.platform === "win32" ? "Windows Browser" : "Mac mini Browser"),
   headless: process.env.BROWSER_CONTROL_HEADLESS === "1",
   actionTimeoutMs: Number(process.env.BROWSER_CONTROL_ACTION_TIMEOUT_MS ?? 5000),
   navigationTimeoutMs: Number(process.env.BROWSER_CONTROL_NAVIGATION_TIMEOUT_MS ?? 30000),

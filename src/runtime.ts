@@ -539,18 +539,17 @@ export class BrowserRuntime {
 
   private async forceKillProfileChrome() {
     const pattern = `--user-data-dir=${config.profileDir}`;
-    const { stdout } = await execFileAsync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
-      .catch(() => ({ stdout: "" }));
-    for (const token of stdout.split(/\s+/).filter(Boolean)) {
-      const pid = Number(token);
+    const pids = process.platform === "win32"
+      ? await windowsProcessIdsContaining(pattern)
+      : await unixProcessIdsContaining(pattern);
+    for (const pid of pids) {
       if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
       try { process.kill(pid, "SIGTERM"); } catch {}
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
-    for (const token of stdout.split(/\s+/).filter(Boolean)) {
-      const pid = Number(token);
+    for (const pid of pids) {
       if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || !pidAlive(pid)) continue;
-      try { process.kill(pid, "SIGKILL"); } catch {}
+      try { process.kill(pid, process.platform === "win32" ? "SIGTERM" : "SIGKILL"); } catch {}
     }
   }
 
@@ -559,6 +558,25 @@ export class BrowserRuntime {
       unlink(path.join(config.profileDir, name)).catch(() => undefined)
     )));
   }
+}
+
+async function unixProcessIdsContaining(pattern: string) {
+  const { stdout } = await execFileAsync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
+    .catch(() => ({ stdout: "" }));
+  return stdout.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
+}
+
+async function windowsProcessIdsContaining(pattern: string) {
+  const script = [
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)",
+    "$needle = $args[0]",
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | ForEach-Object { $_.ProcessId }",
+  ].join("; ");
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, pattern], {
+    encoding: "utf8",
+    maxBuffer: 1_000_000,
+  }).catch(() => ({ stdout: "" }));
+  return stdout.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
 }
 
 async function grantClipboard(page: Page) {

@@ -19,8 +19,8 @@ function toolResult(value: unknown) {
 
 function createMcpServer() {
   const server = new McpServer({
-    name: "macmini-browser",
-    title: "Mac mini Browser",
+    name: config.mcpName,
+    title: config.mcpTitle,
     version: "1.0.0-p1",
   });
 
@@ -78,7 +78,7 @@ function createMcpServer() {
   }, async (args) => toolResult(await runtime.batch(args)));
 
   server.registerTool("clipboard_read", {
-    description: "Read the real macOS system clipboard or the browser Clipboard API",
+    description: "Read the real system clipboard or the browser Clipboard API",
     inputSchema: {
       mode: z.enum(["system", "browser"]).default("system"),
       page: z.string().optional(),
@@ -87,7 +87,7 @@ function createMcpServer() {
   }, async (args) => toolResult(await runtime.clipboardRead(args.mode, args.page, args.grant_permission)));
 
   server.registerTool("clipboard_write", {
-    description: "Write the real macOS system clipboard or the browser Clipboard API",
+    description: "Write the real system clipboard or the browser Clipboard API",
     inputSchema: {
       mode: z.enum(["system", "browser"]).default("system"),
       page: z.string().optional(),

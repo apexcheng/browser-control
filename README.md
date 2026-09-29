@@ -2,12 +2,13 @@
 
 Thin persistent browser runtime policy for local Agent automation.
 
-ChatGPT-facing MCP name: `macmini-browser`. The repository, runtime service,
-profile, and launchd label remain `browser-control` internally.
+ChatGPT-facing MCP name: `macmini-browser` on macOS and `windows-browser` on
+Windows. The repository, runtime service, and profile remain `browser-control`
+internally.
 
 ```text
 Agent
-  -> macmini-browser MCP (browser-control runtime, Streamable HTTP)
+  -> platform browser MCP (browser-control runtime, Streamable HTTP)
   -> thin Runtime Policy Layer
   -> Playwright native API
   -> dedicated Google Chrome persistent context
@@ -42,4 +43,18 @@ See `docs/architecture.md` for reset semantics, batch actions, lifecycle ownersh
 ## macOS service
 
 The production MCP server is kept alive by `launchd/com.openai.browser-control.plist`. The service starts the MCP process only; Dedicated Chrome is started lazily by the first browser operation.
+
+## Windows service
+
+Build first and then register the per-user logon task:
+
+```powershell
+npm install
+npm run build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\install-service.ps1
+```
+
+The task runs `windows/run-browser-control.ps1`, listens on the same local
+`127.0.0.1:8766` endpoint, uses `%USERPROFILE%\browser-control` for runtime
+state, and starts Dedicated Chrome lazily in the interactive user session.
 
