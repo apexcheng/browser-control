@@ -54,7 +54,8 @@ npm run build
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\install-service.ps1
 ```
 
-The task runs `windows/run-browser-control.ps1`, listens on the same local
-`127.0.0.1:8766` endpoint, uses `%USERPROFILE%\browser-control` for runtime
-state, and starts Dedicated Chrome lazily in the interactive user session.
+The task runs `windows/run-browser-control.ps1`, listens on local
+`127.0.0.1:8767` by default (leaving the existing Windows MCP on `8766`), uses
+`%USERPROFILE%\browser-control` for runtime state, and starts Dedicated Chrome
+lazily in the interactive user session.
 

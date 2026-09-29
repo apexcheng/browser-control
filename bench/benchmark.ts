@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const endpoint = process.env.BROWSER_CONTROL_MCP_URL ?? "http://127.0.0.1:8766/mcp";
 const fixturePort = Number(process.env.BROWSER_CONTROL_FIXTURE_PORT ?? 0);
+const primaryModifier = process.platform === "win32" ? "Control" : "Meta";
 
 const fixture = `<!doctype html>
 <html><head><meta charset="utf-8"><title>browser-control P1 fixture</title></head>
@@ -120,8 +121,8 @@ await call("browser_batch", {
   page: "bench",
   actions: [
     { op: "fill", target: "#input", text: "alpha beta" },
-    { op: "press", target: "#input", key: "Meta+A" },
-    { op: "press", target: "#input", key: "Meta+C" },
+    { op: "press", target: "#input", key: `${primaryModifier}+A` },
+    { op: "press", target: "#input", key: `${primaryModifier}+C` },
   ],
 });
 const metaCopy = await call("clipboard_read", { mode: "system" });
@@ -130,8 +131,8 @@ stage("meta copy");
 await call("browser_batch", {
   page: "bench",
   actions: [
-    { op: "press", target: "#input", key: "Meta+A" },
-    { op: "press", target: "#input", key: "Meta+X" },
+    { op: "press", target: "#input", key: `${primaryModifier}+A` },
+    { op: "press", target: "#input", key: `${primaryModifier}+X` },
   ],
 });
 const metaCut = await call("clipboard_read", { mode: "system" });
@@ -145,8 +146,8 @@ await call("clipboard_write", { mode: "system", text: "pasted-value" });
 const pasteValue = await call("browser_batch", {
   page: "bench",
   actions: [
-    { op: "press", target: "#input", key: "Meta+A" },
-    { op: "press", target: "#input", key: "Meta+V" },
+    { op: "press", target: "#input", key: `${primaryModifier}+A` },
+    { op: "press", target: "#input", key: `${primaryModifier}+V` },
     { op: "evaluate", expression: "document.querySelector('#input').value" },
   ],
 });
