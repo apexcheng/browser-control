@@ -40,20 +40,37 @@ export class BrowserRuntime {
   private readonly busyPages = new Set<string>();
   private readonly mutatingPages = new Set<string>();
   private contextMutation = false;
+  private activeOperations = 0;
+  private lastActivityAt = Date.now();
+  private activityGeneration = 0;
+  private readonly activityPages = new WeakSet<Page>();
+  private idleTimer?: NodeJS.Timeout;
+  private idleRecycling?: Promise<void>;
+  private contextClosing?: Promise<void>;
+  private releasingOwner?: Promise<void>;
+  private shuttingDown = false;
+
+  constructor(private readonly idleTimeoutMs = config.idleTimeoutMs) {}
 
   async status() {
     return {
       ok: true,
       running: Boolean(this.context),
+      closing: Boolean(this.contextClosing),
       pid: process.pid,
       profile_dir: config.profileDir,
       runtime_dir: config.runtimeDir,
       launch_count: this.launchCount,
+      idle_timeout_ms: this.idleTimeoutMs,
       pages: this.context ? await this.pages.list() : [],
     };
   }
 
   async reset(level: "soft" | "page" | "context" | "hard", pageRef?: string) {
+    return this.withBrowserActivity(() => this.resetOperation(level, pageRef));
+  }
+
+  private async resetOperation(level: "soft" | "page" | "context" | "hard", pageRef?: string) {
     if (level === "soft") {
       if (!this.context) return { ok: true, level, running: false };
       this.pages.reconcile(this.context.pages());
@@ -89,12 +106,20 @@ export class BrowserRuntime {
   }
 
   async pageList() {
+    return this.withBrowserActivity(() => this.pageListOperation());
+  }
+
+  private async pageListOperation() {
     const context = await this.ensureContext();
     this.pages.reconcile(context.pages());
     return this.pages.list();
   }
 
-  async pageCreate({ alias, url }: { alias?: string; url?: string }) {
+  async pageCreate(input: { alias?: string; url?: string }) {
+    return this.withBrowserActivity(() => this.pageCreateOperation(input));
+  }
+
+  private async pageCreateOperation({ alias, url }: { alias?: string; url?: string }) {
     const context = await this.ensureContext();
     const page = await context.newPage();
     const id = this.attachPage(page);
@@ -109,6 +134,10 @@ export class BrowserRuntime {
   }
 
   async pageClose(pageRef: string) {
+    return this.withBrowserActivity(() => this.pageCloseOperation(pageRef));
+  }
+
+  private async pageCloseOperation(pageRef: string) {
     this.assertNoContextMutation();
     const { id, page } = await this.requirePage(pageRef);
     this.beginPageMutation(id);
@@ -121,10 +150,18 @@ export class BrowserRuntime {
   }
 
   async pageAlias(pageRef: string, alias: string) {
+    return this.withBrowserActivity(() => this.pageAliasOperation(pageRef, alias));
+  }
+
+  private async pageAliasOperation(pageRef: string, alias: string) {
     return { ok: true, ...this.pages.alias(pageRef, alias) };
   }
 
   async clipboardRead(mode: "system" | "browser", pageRef?: string, grantPermission = false) {
+    return this.withBrowserActivity(() => this.clipboardReadOperation(mode, pageRef, grantPermission));
+  }
+
+  private async clipboardReadOperation(mode: "system" | "browser", pageRef?: string, grantPermission = false) {
     if (mode === "system") return { mode, text: clipResult(await readSystemClipboard()) };
     const { page } = await this.requirePage(pageRef);
     if (grantPermission) await grantClipboard(page);
@@ -132,6 +169,10 @@ export class BrowserRuntime {
   }
 
   async clipboardWrite(mode: "system" | "browser", text: string, pageRef?: string, grantPermission = false) {
+    return this.withBrowserActivity(() => this.clipboardWriteOperation(mode, text, pageRef, grantPermission));
+  }
+
+  private async clipboardWriteOperation(mode: "system" | "browser", text: string, pageRef?: string, grantPermission = false) {
     if (mode === "system") {
       await writeSystemClipboard(text);
       return { ok: true, mode };
@@ -143,6 +184,10 @@ export class BrowserRuntime {
   }
 
   async batch(input: BatchInput) {
+    return this.withBrowserActivity(() => this.batchOperation(input));
+  }
+
+  private async batchOperation(input: BatchInput) {
     if (input.actions.length > config.maxActions) throw new Error(`At most ${config.maxActions} actions are allowed`);
     this.assertNoContextMutation();
     const selected = await this.requirePage(input.page);
@@ -221,9 +266,95 @@ export class BrowserRuntime {
   }
 
   async shutdown() {
+    if (this.idleRecycling) await this.idleRecycling.catch(() => undefined);
+    if (this.activeOperations > 0) throw new Error("Cannot shutdown while a browser operation is running");
     this.beginContextMutation("shutdown");
+    this.shuttingDown = true;
+    this.clearIdleTimer();
     try {
       await this.stopContext();
+    } finally {
+      this.contextMutation = false;
+    }
+  }
+
+  private async withBrowserActivity<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.shuttingDown) throw new Error("Browser runtime is shutting down");
+    this.activeOperations += 1;
+    this.noteActivity();
+    try {
+      // A request arriving during graceful close waits, then lazily starts Chrome.
+      if (this.idleRecycling) await this.idleRecycling.catch(() => undefined);
+      return await operation();
+    } finally {
+      this.activeOperations -= 1;
+      this.noteActivity();
+    }
+  }
+
+  private clearIdleTimer() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+  }
+
+  private noteActivity() {
+    this.activityGeneration += 1;
+    this.lastActivityAt = Date.now();
+    this.scheduleIdleCheck();
+  }
+
+  private scheduleIdleCheck() {
+    this.clearIdleTimer();
+    if (!(this.idleTimeoutMs > 0) || this.shuttingDown || !this.context
+      || this.activeOperations > 0 || this.idleRecycling) return;
+    const remaining = Math.max(1, this.idleTimeoutMs - (Date.now() - this.lastActivityAt));
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      const recycling = this.recycleIdleContext();
+      this.idleRecycling = recycling;
+      void recycling.catch((error) => {
+        this.lastActivityAt = Date.now();
+        console.warn("Idle browser recycling skipped:", errorText(error));
+      }).finally(() => {
+        this.idleRecycling = undefined;
+        this.scheduleIdleCheck();
+      });
+    }, remaining);
+    this.idleTimer.unref();
+  }
+
+  private async recycleIdleContext() {
+    const context = this.context;
+    const activityAt = this.lastActivityAt;
+    const generation = this.activityGeneration;
+    if (!context || this.activeOperations > 0 || this.launching || this.contextMutation
+      || this.busyPages.size > 0 || this.mutatingPages.size > 0
+      || Date.now() - activityAt < this.idleTimeoutMs) return;
+
+    const pages = context.pages();
+    // Never infer that an arbitrary URL is idle or safe to close.
+    if (pages.some((page) => page.url() !== "about:blank")) {
+      this.lastActivityAt = Date.now();
+      return;
+    }
+    const empty = await withTimeout(Promise.all(pages.map((page) => page.evaluate(() => (
+      document.head.children.length === 0
+      && [...document.body.childNodes].every((node) => (
+        node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()
+      ))
+    )))), 1_000, "Blank-page check timed out");
+    if (empty.some((value) => !value)) {
+      this.lastActivityAt = Date.now();
+      return;
+    }
+    // Page events and new requests can arrive while the DOM checks are awaited.
+    if (this.activeOperations > 0 || this.activityGeneration !== generation || this.context !== context
+      || context.pages().length !== pages.length
+      || pages.some((page) => page.isClosed() || page.url() !== "about:blank")) return;
+    this.beginContextMutation("idle recycling");
+    try {
+      await this.stopContext();
+      console.log("Idle dedicated browser closed; persistent profile retained");
     } finally {
       this.contextMutation = false;
     }
@@ -255,6 +386,9 @@ export class BrowserRuntime {
   }
 
   private async ensureContext() {
+    if (this.contextClosing) {
+      await withTimeout(this.contextClosing, 5_000, "Previous browser context is still closing; retry later or use hard reset");
+    }
     if (this.context) return this.context;
     if (this.launching) return this.launching;
     this.launching = this.launch().finally(() => { this.launching = undefined; });
@@ -300,6 +434,11 @@ export class BrowserRuntime {
   private attachPage(page: Page) {
     const id = this.pages.register(page);
     this.diagnostics.attach(page, id);
+    if (!this.activityPages.has(page)) {
+      this.activityPages.add(page);
+      page.on("framenavigated", () => this.noteActivity());
+      page.once("close", () => this.noteActivity());
+    }
     return id;
   }
 
@@ -496,7 +635,11 @@ export class BrowserRuntime {
     this.pages.reset();
     this.diagnostics.reset();
     if (context) {
-      const closed = await settlesWithin(context.close(), timeoutMs);
+      const closing = context.close().then(() => this.releaseOwner()).finally(() => {
+        if (this.contextClosing === closing) this.contextClosing = undefined;
+      });
+      this.contextClosing = closing;
+      const closed = await settlesWithin(closing, timeoutMs);
       if (!closed && !force) {
         throw new Error(`Browser context did not close within ${timeoutMs}ms; use hard reset`);
       }
@@ -506,6 +649,7 @@ export class BrowserRuntime {
   }
 
   private async acquireOwner() {
+    if (this.releasingOwner) await this.releasingOwner;
     if (this.ownsLock) return;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -531,10 +675,14 @@ export class BrowserRuntime {
   }
 
   private async releaseOwner() {
+    if (this.releasingOwner) return this.releasingOwner;
     if (!this.ownsLock) return;
-    const owner = await readOwner();
-    if (!owner?.pid || owner.pid === process.pid) await unlink(ownerFile).catch(() => undefined);
-    this.ownsLock = false;
+    this.releasingOwner = (async () => {
+      const owner = await readOwner();
+      if (!owner?.pid || owner.pid === process.pid) await unlink(ownerFile).catch(() => undefined);
+      this.ownsLock = false;
+    })().finally(() => { this.releasingOwner = undefined; });
+    return this.releasingOwner;
   }
 
   private async forceKillProfileChrome() {

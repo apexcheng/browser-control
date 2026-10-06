@@ -16,11 +16,31 @@ The Node MCP process is the only controller process. There is no internal daemon
 
 ## Dedicated Chrome
 
-The runtime lazily creates exactly one Playwright persistent context using Google Chrome (`channel: chrome`) and `~/browser-control/chrome-profile`. The context remains in memory and is reused for all actions until a reset or process shutdown.
+The runtime lazily creates exactly one Playwright persistent context using Google Chrome (`channel: chrome`) and `~/browser-control/chrome-profile`. The context remains in memory and is reused across actions and MCP sessions. Reset, process shutdown, or conservative idle recycling may close it.
 
 An owner lock under `~/browser-control/runtime` prevents two browser-control processes from owning the same profile. Chrome itself also rejects concurrent use of one user-data directory.
 
 No CDP endpoint is part of P1. The runtime does not connect or reconnect per action.
+
+## Idle lifecycle
+
+`BROWSER_CONTROL_IDLE_TIMEOUT_MS` defaults to 30 minutes; zero, negative, invalid, or values above
+`2147483647` disable recycling. Browser operations count as active from entry through
+completion, including lazy launch and page creation, not only `browser_batch`.
+Status/health probes neither launch Chrome nor extend the idle deadline. Page
+navigation and close events extend the deadline.
+
+On expiry, only a context with no pages or exclusively empty `about:blank` pages
+can close. Other URLs are preserved without site-specific heuristics. Blank pages
+with DOM content are also preserved; a bounded check failure keeps Chrome open and
+retries after the configured delay. Eligibility is checked again after asynchronous
+inspection so a new request or navigation prevents stale decisions.
+
+A request arriving during graceful close waits before accessing the context. The
+controller remains alive, profile ownership is released before lazy relaunch, and
+persistent profile data is never removed. No automatic hard reset or process kill
+is used. Blank-page ids/aliases do not survive recycling. Persistent site data can
+survive relaunch; unsaved page state is not promised to survive a context close.
 
 ## Stable pages
 

@@ -29,6 +29,29 @@ There is no browser-agent fallback, Playwright CLI path, CDP reconnect loop, int
 
 Browser startup is lazy. `browser_batch` is the normal interaction path.
 
+## Idle browser recycling
+
+By default, the dedicated browser closes after 30 minutes without browser operations
+or page navigation/close events, but only when there are no pages or every page is
+an empty `about:blank`. Any other URL, or DOM content injected into a blank page,
+keeps the context open. Business pages are never closed merely because tools have
+not been called recently.
+
+The controller stays alive and the profile is retained. The next browser operation
+starts Chrome automatically. Existing tools and Agent steps do not change; blank
+page ids and aliases must be reacquired after recycling, as after a context reset.
+
+Set `BROWSER_CONTROL_IDLE_TIMEOUT_MS` in the service environment to change the delay
+(default `1800000`); set it to `0` to disable recycling. Negative, invalid, or values exceeding the Node timer limit
+(`2147483647` milliseconds) also disable it. Restart the controller to apply configuration/code changes only
+at a safe task boundary, since a service restart closes existing pages.
+
+For isolated real-Chrome acceptance (temporary profile, no production pages):
+
+```bash
+npm run test:idle-browser
+```
+
 ## Development
 
 ```bash

@@ -1,6 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 
+const idleTimeoutMs = Number(process.env.BROWSER_CONTROL_IDLE_TIMEOUT_MS ?? 30 * 60_000);
+
 const rootDir = process.env.BROWSER_CONTROL_HOME ?? path.join(os.homedir(), "browser-control");
 
 export const config = {
@@ -17,6 +19,9 @@ export const config = {
   actionTimeoutMs: Number(process.env.BROWSER_CONTROL_ACTION_TIMEOUT_MS ?? 5000),
   navigationTimeoutMs: Number(process.env.BROWSER_CONTROL_NAVIGATION_TIMEOUT_MS ?? 30000),
   batchTimeoutMs: Number(process.env.BROWSER_CONTROL_BATCH_TIMEOUT_MS ?? 60000),
+  // Zero, negative, invalid, or out-of-range values disable idle recycling.
+  idleTimeoutMs: Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0 && idleTimeoutMs <= 2_147_483_647
+    ? idleTimeoutMs : 0,
   maxActions: 100,
   diagnosticsLimit: 40,
   diagnosticsTextLimit: 2000,
