@@ -26,6 +26,10 @@ export function inspectVisualComponentsInPage(input: {
   includeText: boolean;
 }) {
   // Based on PicassoWeb inspect-component/extractor.ts (page-only extraction).
+  // Non-HTTP pathnames can contain an entire data: document, a local file
+  // path, or a blob identifier. Never persist those values in visual JSON.
+  const url = location.protocol === "http:" || location.protocol === "https:"
+    ? location.origin + location.pathname : location.protocol + "[redacted]";
   const matches = Array.from(document.querySelectorAll<HTMLElement>(input.selector));
   const stylesOf = (element: Element, pseudo?: "::before" | "::after") => {
     const style = getComputedStyle(element, pseudo);
@@ -38,7 +42,7 @@ export function inspectVisualComponentsInPage(input: {
   const safeStyle = (name: string, value: string) => /url\s*\(/i.test(value) ? "[resource url omitted]" : value;
   return {
     kind: "components",
-    url: location.origin + location.pathname,
+    url,
     selector: input.selector,
     matches: matches.length,
     viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
@@ -63,8 +67,10 @@ export function inspectVisualComponentsInPage(input: {
 
 export function inspectVisualLayoutInPage(input: { selector: string; maxDepth: number; maxNodes: number; includeText: boolean }) {
   // Based on PicassoWeb extract-layout/extractor.ts; capped breadth-first traversal.
+  const url = location.protocol === "http:" || location.protocol === "https:"
+    ? location.origin + location.pathname : location.protocol + "[redacted]";
   const root = document.querySelector(input.selector);
-  if (!root) return { kind: "layout", url: location.origin + location.pathname, selector: input.selector, root: null, nodes: 0, truncated: false };
+  if (!root) return { kind: "layout", url, selector: input.selector, root: null, nodes: 0, truncated: false };
   const props = ["display", "position", "flex-direction", "justify-content", "align-items", "align-self",
     "gap", "grid-template-columns", "grid-template-rows", "padding", "margin", "overflow", "z-index"];
   type Node = { tag: string; id?: string; classes?: string[]; bounds: { x: number; y: number; width: number; height: number };
@@ -107,5 +113,5 @@ export function inspectVisualLayoutInPage(input: { selector: string; maxDepth: n
       truncated = true;
     }
   }
-  return { kind: "layout", url: location.origin + location.pathname, selector: input.selector, root: result, nodes: count, truncated: truncated || index < queue.length };
+  return { kind: "layout", url, selector: input.selector, root: result, nodes: count, truncated: truncated || index < queue.length };
 }

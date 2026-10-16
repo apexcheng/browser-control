@@ -174,7 +174,7 @@ test("tsx-serialized visual callbacks execute in a page-like context without lea
   };
   const context = {
     document: { querySelectorAll: () => [component] },
-    location: { origin: "https://example.test", pathname: "/sheet", href: "https://example.test/sheet?access_token=SECRET" },
+    location: { protocol: "https:", origin: "https://example.test", pathname: "/sheet", href: "https://example.test/sheet?access_token=SECRET" },
     innerWidth: 100, innerHeight: 200, devicePixelRatio: 2,
     getComputedStyle: () => ({
       content: "none",
@@ -188,6 +188,27 @@ test("tsx-serialized visual callbacks execute in a page-like context without lea
   assert.equal(data.elements[0].text, undefined);
   assert.equal(JSON.stringify(data).includes("SECRET"), false);
   assert.equal(data.url, "https://example.test/sheet");
+});
+
+test("both visual extractors redact special URLs rather than persisting source or local paths", () => {
+  const layoutInput = { selector: "main", maxDepth: 0, maxNodes: 1, includeText: false };
+  const componentInput = { selector: "main", maxMatches: 1, properties: [], includeText: false };
+  for (const location of [
+    { protocol: "data:", origin: "null", pathname: "text/html;base64,SECRET_PAGE_CONTENT" },
+    { protocol: "blob:", origin: "null", pathname: "https://example.test/SECRET_BLOB_ID" },
+    { protocol: "file:", origin: "null", pathname: "/Users/hs/SECRET_FILENAME.html" },
+  ]) {
+    const context = {
+      location,
+      document: { querySelector: () => null, querySelectorAll: () => [] },
+      innerWidth: 100, innerHeight: 100, devicePixelRatio: 2,
+    };
+    const components = runInNewContext(visualPageExpression(inspectVisualComponentsInPage, componentInput), context);
+    const layout = runInNewContext(visualPageExpression(inspectVisualLayoutInPage, layoutInput), context);
+    assert.equal(components.url, location.protocol + "[redacted]");
+    assert.equal(layout.url, location.protocol + "[redacted]");
+    assert.equal(JSON.stringify({ components, layout }).includes("SECRET"), false);
+  }
 });
 
 test("component inspection includes align-self and outline-offset", () => {
@@ -205,7 +226,7 @@ test("layout extraction limits DOM scanning and marks depth truncation", () => {
   const root = { ...leaf, children: Array.from({ length: 10_000 }, () => leaf) };
   const context = {
     document: { querySelector: () => root },
-    location: { origin: "https://example.test", pathname: "/sheet" },
+    location: { protocol: "https:", origin: "https://example.test", pathname: "/sheet" },
     Node: { TEXT_NODE: 3 },
     getComputedStyle: () => {
       styleReads++;
