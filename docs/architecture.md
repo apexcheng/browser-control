@@ -81,6 +81,9 @@ There are no single-action click/fill/evaluate tools and no start/stop/page-use 
 - `screenshot`
 - `dialog`
 - `wait_response`
+- `network_log` (`clear` / `read`)
+- `download` (trigger + save artifact)
+- `websocket_log` (`start` / `read` / `stop`)
 - `clipboard`
 
 There is no unconditional sleep action. `dialog` and `wait_response` take a bounded trigger action so the waiter is installed before the triggering operation.
@@ -104,7 +107,11 @@ The profile is never deleted by reset, so persistent login state remains a profi
 
 ## Diagnostics
 
-For each page, browser-control keeps only the latest 40 console events and 40 network events, with message/URL fields truncated. Batch failures always include operation, target summary, current URL, page id/aliases, active element/selection, and latest dialog metadata. Console/network excerpts are returned only when requested. Error screenshots are opt-in and always written below `~/browser-control/artifacts`; only the newest 50 artifacts are retained.
+For each page, browser-control keeps only the latest 40 console events and up to 120 network requests, with message/URL fields truncated. Batch failures always include operation, target summary, current URL, page id/aliases, active element/selection, and latest dialog metadata. Console/network excerpts are returned only when requested. Error screenshots are opt-in and always written below `~/browser-control/artifacts`; only the newest 50 artifacts are retained.
+
+To discover unknown request URLs, use `network_log` with `action: "clear"` (optionally `resource_type: "api"` to capture only XHR/Fetch), perform the interaction, then `network_log` with `action: "read"`. The per-page network log aggregates request/response/failure into at most 120 entries; read supports `resource_type`, `url_contains`, and `method` filters, and reports `dropped` entries. Requests already in flight when clearing the log may not be recorded. For a known URL, `wait_response` retrieves a response body and can optionally include request Content-Type and a bounded text payload using `request_body: "text"`; it never returns authentication headers.
+
+`download` arms the Playwright download waiter before its `trigger`, then saves with a generated safe name to the bounded artifacts directory. Locator-based actions accept an optional CSS `frame` selector for a single iframe (including triggers). `websocket_log` is explicitly started per page, retains at most 60 events, and by default stores only frame direction and size; `include_payload: true` captures capped text frame content only. These are `browser_batch` actions, not new MCP tools. Browser profile, pages and contexts remain shared and persistent.
 
 ## Clipboard
 

@@ -18,21 +18,23 @@ const gotoAction = z.object({
   wait_until: z.enum(["commit", "domcontentloaded", "load", "networkidle"]).default("domcontentloaded"),
   timeout_ms: timeoutMs,
 });
-const clickAction = z.object({ op: z.literal("click"), target: locatorSpecSchema, timeout_ms: timeoutMs });
-const dblclickAction = z.object({ op: z.literal("dblclick"), target: locatorSpecSchema, timeout_ms: timeoutMs });
-const fillAction = z.object({ op: z.literal("fill"), target: locatorSpecSchema, text: z.string(), timeout_ms: timeoutMs });
-const pressAction = z.object({ op: z.literal("press"), key: z.string().min(1), target: locatorSpecSchema.optional(), timeout_ms: timeoutMs });
-const hoverAction = z.object({ op: z.literal("hover"), target: locatorSpecSchema, timeout_ms: timeoutMs });
-const dragAction = z.object({ op: z.literal("drag"), from: locatorSpecSchema, to: locatorSpecSchema, timeout_ms: timeoutMs });
+const frame = z.string().min(1).optional();
+const clickAction = z.object({ op: z.literal("click"), target: locatorSpecSchema, frame, timeout_ms: timeoutMs });
+const dblclickAction = z.object({ op: z.literal("dblclick"), target: locatorSpecSchema, frame, timeout_ms: timeoutMs });
+const fillAction = z.object({ op: z.literal("fill"), target: locatorSpecSchema, text: z.string(), frame, timeout_ms: timeoutMs });
+const pressAction = z.object({ op: z.literal("press"), key: z.string().min(1), target: locatorSpecSchema.optional(), frame, timeout_ms: timeoutMs });
+const hoverAction = z.object({ op: z.literal("hover"), target: locatorSpecSchema, frame, timeout_ms: timeoutMs });
+const dragAction = z.object({ op: z.literal("drag"), from: locatorSpecSchema, to: locatorSpecSchema, frame, timeout_ms: timeoutMs });
 const waitForAction = z.object({
   op: z.literal("wait_for"),
   target: locatorSpecSchema,
+  frame,
   state: z.enum(["attached", "detached", "visible", "hidden"]).default("visible"),
   timeout_ms: timeoutMs,
 });
-const textAction = z.object({ op: z.literal("text"), target: locatorSpecSchema, timeout_ms: timeoutMs });
-const attrAction = z.object({ op: z.literal("attr"), target: locatorSpecSchema, name: z.string().min(1), timeout_ms: timeoutMs });
-const countAction = z.object({ op: z.literal("count"), target: locatorSpecSchema, timeout_ms: timeoutMs });
+const textAction = z.object({ op: z.literal("text"), target: locatorSpecSchema, frame, timeout_ms: timeoutMs });
+const attrAction = z.object({ op: z.literal("attr"), target: locatorSpecSchema, name: z.string().min(1), frame, timeout_ms: timeoutMs });
+const countAction = z.object({ op: z.literal("count"), target: locatorSpecSchema, frame, timeout_ms: timeoutMs });
 const evaluateAction = z.object({ op: z.literal("evaluate"), expression: z.string().min(1).max(20_000), timeout_ms: timeoutMs });
 const screenshotAction = z.object({
   op: z.literal("screenshot"),
@@ -63,14 +65,30 @@ const waitResponseAction = z.object({
   url_contains: z.string().min(1),
   method: z.string().min(1).optional(),
   body: z.enum(["none", "text", "json"]).default("none"),
+  request_body: z.enum(["none", "text"]).default("none"),
   trigger: triggerActionSchema,
+  timeout_ms: timeoutMs,
+});
+const networkLogAction = z.object({
+  op: z.literal("network_log"),
+  action: z.enum(["read", "clear"]),
+  resource_type: z.enum(["all", "api", "xhr", "fetch"]).default("all"),
+  url_contains: z.string().optional(),
+  method: z.string().optional(),
+  timeout_ms: timeoutMs,
+});
+const downloadAction = z.object({ op: z.literal("download"), trigger: triggerActionSchema, timeout_ms: timeoutMs });
+const websocketLogAction = z.object({
+  op: z.literal("websocket_log"),
+  action: z.enum(["start", "read", "stop"]),
+  include_payload: z.boolean().default(false),
   timeout_ms: timeoutMs,
 });
 
 export const batchActionSchema = z.discriminatedUnion("op", [
   gotoAction, clickAction, dblclickAction, fillAction, pressAction, hoverAction, dragAction,
   waitForAction, textAction, attrAction, countAction, evaluateAction, screenshotAction,
-  dialogAction, waitResponseAction, clipboardAction,
+  dialogAction, waitResponseAction, networkLogAction, downloadAction, websocketLogAction, clipboardAction,
 ]);
 
 export type BatchAction = z.infer<typeof batchActionSchema>;

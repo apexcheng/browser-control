@@ -23,6 +23,15 @@ test("P1 batch actions include bounded trigger primitives and no sleep action", 
     { op: "clipboard", action: "read", mode: "system" },
     { op: "dialog", action: "accept", trigger: { op: "click", target: "#confirm" } },
     { op: "wait_response", url_contains: "/api/", body: "json", trigger: { op: "click", target: "#load" } },
+    { op: "network_log", action: "clear" },
+    { op: "network_log", action: "read" },
+    { op: "network_log", action: "clear", resource_type: "api" },
+    { op: "wait_response", url_contains: "/api/", body: "json", request_body: "text", trigger: { op: "click", target: "#load" } },
+    { op: "download", trigger: { op: "click", target: "#export" } },
+    { op: "click", frame: "iframe#panel", target: "#save" },
+    { op: "websocket_log", action: "start" },
+    { op: "websocket_log", action: "read", include_payload: true },
+    { op: "websocket_log", action: "stop" },
   ];
   for (const action of valid) assert.equal(batchActionSchema.safeParse(action).success, true);
   assert.equal(batchActionSchema.safeParse({ op: "wait", ms: 1000 }).success, false);

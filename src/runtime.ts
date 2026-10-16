@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -449,17 +450,18 @@ export class BrowserRuntime {
     return this.pages.resolve(ref);
   }
 
-  private locator(page: Page, spec: LocatorSpec): Locator {
-    if (typeof spec === "string") return page.locator(spec);
+  private locator(page: Page, spec: LocatorSpec, frame?: string): Locator {
+    const scope = frame ? page.frameLocator(frame) : page;
+    if (typeof spec === "string") return scope.locator(spec);
     switch (spec.by) {
       case "role":
-        return page.getByRole(spec.role as any, { name: spec.name, exact: spec.exact });
+        return scope.getByRole(spec.role as any, { name: spec.name, exact: spec.exact });
       case "text":
-        return page.getByText(spec.text, { exact: spec.exact });
+        return scope.getByText(spec.text, { exact: spec.exact });
       case "label":
-        return page.getByLabel(spec.text, { exact: spec.exact });
+        return scope.getByLabel(spec.text, { exact: spec.exact });
       case "testId":
-        return page.getByTestId(spec.value);
+        return scope.getByTestId(spec.value);
     }
   }
 
@@ -470,33 +472,33 @@ export class BrowserRuntime {
         return { url: page.url(), status: response?.status() };
       }
       case "click":
-        await this.locator(page, action.target).click({ timeout });
+        await this.locator(page, action.target, action.frame).click({ timeout });
         return true;
       case "dblclick":
-        await this.locator(page, action.target).dblclick({ timeout });
+        await this.locator(page, action.target, action.frame).dblclick({ timeout });
         return true;
       case "fill":
-        await this.locator(page, action.target).fill(action.text, { timeout });
+        await this.locator(page, action.target, action.frame).fill(action.text, { timeout });
         return true;
       case "press":
-        if (action.target) await this.locator(page, action.target).press(action.key, { timeout });
+        if (action.target) await this.locator(page, action.target, action.frame).press(action.key, { timeout });
         else await page.keyboard.press(action.key);
         return true;
       case "hover":
-        await this.locator(page, action.target).hover({ timeout });
+        await this.locator(page, action.target, action.frame).hover({ timeout });
         return true;
       case "drag":
-        await this.locator(page, action.from).dragTo(this.locator(page, action.to), { timeout });
+        await this.locator(page, action.from, action.frame).dragTo(this.locator(page, action.to, action.frame), { timeout });
         return true;
       case "wait_for":
-        await this.locator(page, action.target).waitFor({ state: action.state, timeout });
+        await this.locator(page, action.target, action.frame).waitFor({ state: action.state, timeout });
         return true;
       case "text":
-        return clipResult(await this.locator(page, action.target).innerText({ timeout }));
+        return clipResult(await this.locator(page, action.target, action.frame).innerText({ timeout }));
       case "attr":
-        return this.locator(page, action.target).getAttribute(action.name, { timeout });
+        return this.locator(page, action.target, action.frame).getAttribute(action.name, { timeout });
       case "count":
-        return this.locator(page, action.target).count();
+        return this.locator(page, action.target, action.frame).count();
       case "evaluate":
         return page.evaluate(action.expression);
       case "screenshot":
@@ -508,6 +510,12 @@ export class BrowserRuntime {
         return this.runDialog(pageId, page, action, timeout);
       case "wait_response":
         return this.runWaitResponse(pageId, page, action, timeout);
+      case "network_log":
+        return this.diagnostics.networkLog(pageId, action.action, action);
+      case "download":
+        return this.runDownload(pageId, page, action, timeout);
+      case "websocket_log":
+        return this.diagnostics.websocketLog(pageId, action.action, action.include_payload);
     }
   }
 
@@ -541,15 +549,41 @@ export class BrowserRuntime {
       responsePromise,
       this.runTrigger(pageId, page, action.trigger, timeout),
     ]);
-    return this.responseValue(response, action.body);
+    return this.responseValue(response, action.body, action.request_body);
   }
 
-  private async responseValue(response: Response, bodyMode: "none" | "text" | "json") {
+  private async runDownload(pageId: string, page: Page, action: Extract<BatchAction, { op: "download" }>, timeout: number) {
+    const [download] = await Promise.all([
+      page.waitForEvent("download", { timeout }),
+      this.runTrigger(pageId, page, action.trigger, timeout),
+    ]);
+    const suggested = download.suggestedFilename().replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80) || "file";
+    const filepath = path.join(config.artifactDir, `download-${randomUUID()}-${suggested}`);
+    await mkdir(config.artifactDir, { recursive: true });
+    await withTimeout(download.saveAs(filepath), timeout, "Download save timed out");
+    await this.pruneArtifacts();
+    return { path: filepath, suggested_filename: download.suggestedFilename() };
+  }
+
+  private async responseValue(response: Response, bodyMode: "none" | "text" | "json", requestBodyMode: "none" | "text" = "none") {
     const value: Record<string, unknown> = {
       url: response.url(),
       method: response.request().method(),
       status: response.status(),
     };
+    if (requestBodyMode === "text") {
+      const request = response.request();
+      const contentType = request.headers()["content-type"] ?? null;
+      const payload = request.postDataBuffer();
+      value.request = {
+        resource_type: request.resourceType(),
+        content_type: contentType,
+        body: !payload ? null : payload.length > config.requestPayloadLimit
+          ? { omitted: true, bytes: payload.length, limit: config.requestPayloadLimit }
+          : /^(application\/(json|[^;]+\+json|x-www-form-urlencoded|xml)|text\/)/i.test(contentType ?? "")
+            ? payload.toString("utf8") : { omitted: true, reason: "non-text content type" },
+      };
+    }
     if (bodyMode === "none") return value;
     const body = await response.body();
     if (body.length > config.responseBodyLimit) {
