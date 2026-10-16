@@ -6,9 +6,9 @@
  */
 export const VISUAL_STYLE_PROPS = [
   "display", "position", "z-index", "box-sizing", "overflow", "opacity",
-  "width", "height", "margin", "padding", "gap", "align-items", "justify-content",
+  "width", "height", "margin", "padding", "gap", "align-items", "align-self", "justify-content",
   "flex-direction", "color", "background-color", "background-image", "border",
-  "border-radius", "box-shadow", "outline", "font-family", "font-size", "font-weight",
+  "border-radius", "box-shadow", "outline", "outline-offset", "font-family", "font-size", "font-weight",
   "font-style", "line-height", "letter-spacing", "text-align", "transform",
   "transition", "cursor", "fill", "stroke",
 ] as const;
@@ -65,7 +65,7 @@ export function inspectVisualLayoutInPage(input: { selector: string; maxDepth: n
   // Based on PicassoWeb extract-layout/extractor.ts; capped breadth-first traversal.
   const root = document.querySelector(input.selector);
   if (!root) return { kind: "layout", url: location.origin + location.pathname, selector: input.selector, root: null, nodes: 0, truncated: false };
-  const props = ["display", "position", "flex-direction", "justify-content", "align-items",
+  const props = ["display", "position", "flex-direction", "justify-content", "align-items", "align-self",
     "gap", "grid-template-columns", "grid-template-rows", "padding", "margin", "overflow", "z-index"];
   type Node = { tag: string; id?: string; classes?: string[]; bounds: { x: number; y: number; width: number; height: number };
     styles: Record<string, string>; text?: string; scroll?: { x: number; y: number }; children?: Node[] };
@@ -82,8 +82,10 @@ export function inspectVisualLayoutInPage(input: { selector: string; maxDepth: n
       tag: element.tagName.toLowerCase(),
       ...(element.id ? { id: element.id } : {}),
       ...(element.classList.length ? { classes: [...element.classList].slice(0, 4) } : {}),
-      bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-      styles: Object.fromEntries(props.map((name) => [name, style.getPropertyValue(name)]).filter(([, value]) => value && value !== "normal" && value !== "auto")),
+      bounds: { x: +rect.x.toFixed(2), y: +rect.y.toFixed(2), width: +rect.width.toFixed(2), height: +rect.height.toFixed(2) },
+      // Keep computed "normal"/"auto" values: they explain Flex stretching
+      // and scrolling, even when no explicit declaration is present.
+      styles: Object.fromEntries(props.map((name) => [name, style.getPropertyValue(name)])),
       ...((element as HTMLElement).scrollHeight > (element as HTMLElement).clientHeight + 1
         ? { scroll: { x: (element as HTMLElement).scrollLeft, y: (element as HTMLElement).scrollTop } } : {}),
     };

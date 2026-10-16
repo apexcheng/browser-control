@@ -66,24 +66,73 @@ if (flags["reference-json"] && flags["target-json"]) {
   const [refData, targetData] = await Promise.all(
     [flags["reference-json"], flags["target-json"]].map(async (file) => JSON.parse(await readFile(file, "utf8"))),
   );
-  const before = refData.elements || [];
-  const after = targetData.elements || [];
-  report.componentMatching = "array-index (selectors must refer to corresponding components)";
-  report.componentDifferences = Array.from({ length: Math.max(before.length, after.length) }, (_, i) => {
-    const a = before[i], b = after[i];
-    if (!a || !b) return { index: i, type: a ? "missing-target" : "added-target" };
-    const differences = (left, right) => Object.fromEntries(
-      [...new Set([...Object.keys(left || {}), ...Object.keys(right || {})])]
-        .filter((key) => JSON.stringify(left?.[key]) !== JSON.stringify(right?.[key]))
-        .map((key) => [key, [left?.[key] ?? null, right?.[key] ?? null]]),
-    );
-    const bounds = differences(a.bounds, b.bounds);
-    const styles = differences(a.styles, b.styles);
-    const pseudo = differences(a.pseudo, b.pseudo);
-    const fonts = JSON.stringify(a.platformFonts || []) !== JSON.stringify(b.platformFonts || [])
-      ? [a.platformFonts || [], b.platformFonts || []] : undefined;
-    if (!Object.keys(bounds).length && !Object.keys(styles).length && !Object.keys(pseudo).length && !fonts) return null;
-    return { index: i, referenceText: a.text, targetText: b.text, bounds, styles, pseudo, ...(fonts ? { fonts } : {}) };
-  }).filter(Boolean);
+  const detectKind = (data) => data.kind || (Array.isArray(data.elements) ? "components" : undefined);
+  const kind = detectKind(refData);
+  if (!["layout", "components"].includes(kind) || detectKind(targetData) !== kind) {
+    throw new Error("JSON comparison requires two compatible visual_inspect results (both components or both layout)");
+  }
+  const differences = (left, right) => Object.fromEntries(
+    [...new Set([...Object.keys(left || {}), ...Object.keys(right || {})])]
+      .filter((key) => JSON.stringify(left?.[key]) !== JSON.stringify(right?.[key]))
+      .map((key) => [key, [left?.[key] ?? null, right?.[key] ?? null]]),
+  );
+  report.comparisonKind = kind;
+  if (kind === "components") {
+    const before = refData.elements || [];
+    const after = targetData.elements || [];
+    report.componentMatching = "array-index (selectors must refer to corresponding components)";
+    report.matchingWarnings = [];
+    report.componentDifferences = Array.from({ length: Math.max(before.length, after.length) }, (_, i) => {
+      const a = before[i], b = after[i];
+      if (!a || !b) {
+        report.matchingWarnings.push(`Component at index ${i} is missing on one side; remaining positional matches may not correspond.`);
+        return { index: i, type: a ? "missing-target" : "added-target" };
+      }
+      const identity = differences(
+        { tag: a.tag, id: a.id, role: a.role, classes: a.classes },
+        { tag: b.tag, id: b.id, role: b.role, classes: b.classes },
+      );
+      if ((a.tag && b.tag && a.tag !== b.tag) || (a.id && b.id && a.id !== b.id)) {
+        report.matchingWarnings.push(`Index ${i} has different tag/id; verify these are corresponding components before interpreting style deltas.`);
+      }
+      const bounds = differences(a.bounds, b.bounds);
+      const styles = differences(a.styles, b.styles);
+      const pseudo = differences(a.pseudo, b.pseudo);
+      const fonts = JSON.stringify(a.platformFonts || []) !== JSON.stringify(b.platformFonts || [])
+        ? [a.platformFonts || [], b.platformFonts || []] : undefined;
+      if (!Object.keys(identity).length && !Object.keys(bounds).length && !Object.keys(styles).length && !Object.keys(pseudo).length && !fonts) return null;
+      return { index: i, referenceText: a.text, targetText: b.text, identity, bounds, styles, pseudo, ...(fonts ? { fonts } : {}) };
+    }).filter(Boolean);
+  } else {
+    report.layoutMatching = "child-index path (nodes must correspond within their parents)";
+    report.matchingWarnings = [];
+    report.layoutDifferences = [];
+    const walk = (a, b, path = "root") => {
+      if (!a || !b) {
+        if (a !== b) report.layoutDifferences.push({ path, type: a ? "missing-target" : "added-target" });
+        return;
+      }
+      const bounds = differences(a.bounds, b.bounds);
+      const styles = differences(a.styles, b.styles);
+      const scroll = differences(a.scroll, b.scroll);
+      const identity = differences({ tag: a.tag, id: a.id }, { tag: b.tag, id: b.id });
+      if ((a.tag && b.tag && a.tag !== b.tag) || (a.id && b.id && a.id !== b.id)) {
+        report.matchingWarnings.push(`Layout ${path} has different tag/id; child-index correspondence may be invalid.`);
+      }
+      const text = a.text !== b.text ? [a.text ?? null, b.text ?? null] : undefined;
+      if (Object.keys(bounds).length || Object.keys(styles).length || Object.keys(scroll).length
+        || Object.keys(identity).length || text) {
+        report.layoutDifferences.push({
+          path, bounds, styles, scroll, identity, ...(text ? { text } : {}),
+        });
+      }
+      const count = Math.max(a.children?.length || 0, b.children?.length || 0);
+      for (let i = 0; i < count; i++) walk(a.children?.[i], b.children?.[i], `${path}.${i}`);
+    };
+    walk(refData.root, targetData.root);
+    if (refData.truncated || targetData.truncated) {
+      (report.warnings ??= []).push("Layout extraction was truncated; differences outside the extracted nodes are unknown.");
+    }
+  }
 }
 console.log(JSON.stringify(report, null, 2));

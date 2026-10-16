@@ -40,6 +40,10 @@ const screenshotAction = z.object({
   op: z.literal("screenshot"),
   full_page: z.boolean().default(false),
   target: locatorSpecSchema.optional(),
+  // Extra pixels around a target preserve focus rings, shadows and outlines.
+  padding_px: z.number().int().min(0).max(64).default(4),
+  // Optional second capture detects transient scrollbars, animations and cursors.
+  stability_check: z.boolean().default(false),
   name: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/).optional(),
   timeout_ms: timeoutMs,
 });

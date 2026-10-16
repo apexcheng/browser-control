@@ -4,6 +4,8 @@ import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs
 import path from "node:path";
 import { promisify } from "node:util";
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from "playwright";
+import { PNG } from "pngjs";
+import pixelmatch from "pixelmatch";
 import { readSystemClipboard, writeSystemClipboard } from "./clipboard.js";
 import { config } from "./config.js";
 import { Diagnostics } from "./diagnostics.js";
@@ -524,7 +526,8 @@ export class BrowserRuntime {
       case "evaluate":
         return page.evaluate(action.expression);
       case "screenshot":
-        return this.captureScreenshot(page, action.name, action.full_page, timeout, action.target);
+        return this.captureScreenshot(page, action.name, action.full_page, timeout, action.target,
+          action.padding_px, action.stability_check);
       case "visual_inspect": {
         const deadline = Date.now() + timeout;
         const ensureActive = () => {
@@ -734,13 +737,127 @@ export class BrowserRuntime {
   }
 
   private async captureScreenshot(
-    page: Page, name?: string, fullPage = false, timeout = config.actionTimeoutMs, target?: LocatorSpec,
+    page: Page, name?: string, fullPage = false, timeout = config.actionTimeoutMs,
+    target?: LocatorSpec, paddingPx = 4, stabilityCheck = false,
   ) {
     await mkdir(config.artifactDir, { recursive: true });
     const filename = name ?? `shot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
     const filepath = path.join(config.artifactDir, filename.endsWith(".png") ? filename : `${filename}.png`);
-    if (target) await this.locator(page, target).screenshot({ path: filepath, timeout });
-    else await page.screenshot({ path: filepath, fullPage, timeout });
+    if (target) {
+      const locator = this.locator(page, target);
+      const snapshot = () => locator.evaluate((element) => {
+        const r = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return {
+          rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          hover: element.matches(":hover"), focus: element.matches(":focus"),
+          focusWithin: element.matches(":focus-within"),
+          styles: {
+            background: style.backgroundColor, color: style.color, border: style.border,
+            outline: style.outline, shadow: style.boxShadow, opacity: style.opacity,
+            outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth,
+            outlineOffset: style.outlineOffset, transform: style.transform, visibility: style.visibility,
+          },
+        };
+      }, undefined, { timeout });
+      const before = await snapshot();
+      // An estimate, not a proof of sufficient padding: blur/shadow effects
+      // can extend beyond their CSS radius. Surface a warning rather than
+      // falsely asserting that the resulting pixels are complete.
+      const px = (value: string) => parseFloat(value) || 0;
+      const outlinePadding = before.styles.outlineStyle === "none"
+        ? 0 : Math.max(0, px(before.styles.outlineWidth) + px(before.styles.outlineOffset));
+      const shadowPadding = before.styles.shadow.split(/,(?![^()]*\))/).reduce((max, shadow) => {
+        if (/\binset\b/.test(shadow)) return max;
+        const numbers = [...shadow.matchAll(/(-?\d+(?:\.\d+)?)px/g)].map((match) => Number(match[1]));
+        if (numbers.length < 2) return max;
+        const [offsetX, offsetY, blur = 0, spread = 0] = numbers;
+        return Math.max(max, Math.max(Math.abs(offsetX!), Math.abs(offsetY!))
+          + Math.max(0, blur) * 2 + spread);
+      }, 0);
+      const recommendedPadding = Math.ceil(Math.max(0, outlinePadding, shadowPadding));
+      const { x, y, width, height } = before.rect;
+      const viewport = before.viewport;
+      if (width <= 0 || height <= 0 || x < 0 || y < 0
+        || x + width > viewport.width || y + height > viewport.height) {
+        throw new Error("Target screenshot requires the entire element to be visible in the viewport; scroll explicitly first to preserve hover/focus state");
+      }
+      // Playwright's locator.screenshot AND page.screenshot({clip}) can
+      // change :hover by repositioning the pointer / viewport. Capture the
+      // existing viewport, then crop its PNG in memory without writing a
+      // full-page artifact or changing the browser's interaction state.
+      const left = Math.max(0, x - paddingPx);
+      const top = Math.max(0, y - paddingPx);
+      const right = Math.min(viewport.width, x + width + paddingPx);
+      const bottom = Math.min(viewport.height, y + height + paddingPx);
+      const clip = { x: left, y: top, width: right - left, height: bottom - top };
+      const effectsMayBeClipped = paddingPx < recommendedPadding
+        || left > x - recommendedPadding || top > y - recommendedPadding
+        || right < x + width + recommendedPadding || bottom < y + height + recommendedPadding;
+      const captured = await page.screenshot({ timeout });
+      const after = await snapshot();
+      if (JSON.stringify({ ...before, rect: undefined }) !== JSON.stringify({ ...after, rect: undefined })
+        || JSON.stringify(before.rect) !== JSON.stringify(after.rect)) {
+        throw new Error("Target visual state changed during screenshot; screenshot discarded rather than comparing mismatched states");
+      }
+      const source = PNG.sync.read(captured);
+      const scaleX = source.width / viewport.width;
+      const scaleY = source.height / viewport.height;
+      const bounds = {
+        x: Math.max(0, Math.floor(left * scaleX)),
+        y: Math.max(0, Math.floor(top * scaleY)),
+        right: Math.min(source.width, Math.ceil(right * scaleX)),
+        bottom: Math.min(source.height, Math.ceil(bottom * scaleY)),
+      };
+      const cropped = new PNG({ width: bounds.right - bounds.x, height: bounds.bottom - bounds.y });
+      for (let row = 0; row < cropped.height; row++) {
+        source.data.copy(cropped.data, row * cropped.width * 4,
+          ((bounds.y + row) * source.width + bounds.x) * 4,
+          ((bounds.y + row) * source.width + bounds.right) * 4);
+      }
+      let stability: { checked: true; mismatched_pixels: number; stable: boolean } | undefined;
+      if (stabilityCheck) {
+        const secondCapture = await page.screenshot({ timeout });
+        const secondState = await snapshot();
+        if (JSON.stringify(after) !== JSON.stringify(secondState)) {
+          throw new Error("Target visual state changed during stability check; screenshot discarded");
+        }
+        const second = PNG.sync.read(secondCapture);
+        if (second.width !== source.width || second.height !== source.height) {
+          throw new Error("Viewport dimensions changed during stability check; screenshot discarded");
+        }
+        const secondCrop = new PNG({ width: cropped.width, height: cropped.height });
+        for (let row = 0; row < secondCrop.height; row++) {
+          second.data.copy(secondCrop.data, row * secondCrop.width * 4,
+            ((bounds.y + row) * second.width + bounds.x) * 4,
+            ((bounds.y + row) * second.width + bounds.right) * 4);
+        }
+        const changedPixels = pixelmatch(cropped.data, secondCrop.data, undefined, cropped.width, cropped.height,
+          { threshold: 0.1, includeAA: false });
+        stability = { checked: true, mismatched_pixels: changedPixels, stable: changedPixels === 0 };
+      }
+      await writeFile(filepath, PNG.sync.write(cropped));
+      await this.pruneArtifacts();
+      return {
+        path: filepath, clip, padding_px: paddingPx,
+        padding_clipped: left > x - paddingPx || top > y - paddingPx
+          || right < x + width + paddingPx || bottom < y + height + paddingPx,
+        recommended_padding_px: recommendedPadding,
+        effects_may_be_clipped: effectsMayBeClipped,
+        ...(stability ? { stability } : {}),
+        ...((effectsMayBeClipped || (stability && !stability.stable)) ? {
+          warnings: [
+            ...(effectsMayBeClipped
+              ? [`Outline/shadow may be cropped; estimated margin ${recommendedPadding}px (padding_px max 64). Check viewport edges or use full-page screenshot.`]
+              : []),
+            ...(stability && !stability.stable
+              ? [`Repeated screenshots differ by ${stability.mismatched_pixels} pixels; inspect scrollbars, animations and dynamic content.`] : []),
+          ],
+        } : {}),
+      };
+    }
+    await page.screenshot({ path: filepath, fullPage, timeout });
     await this.pruneArtifacts();
     return { path: filepath };
   }

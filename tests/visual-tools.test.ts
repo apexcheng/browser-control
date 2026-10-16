@@ -9,19 +9,31 @@ import { PNG } from "pngjs";
 import type { Page } from "playwright";
 import { BrowserRuntime } from "../src/runtime.js";
 import { batchActionSchema } from "../src/schema.js";
-import { inspectVisualComponentsInPage, inspectVisualLayoutInPage, visualPageExpression } from "../src/visual.js";
+import { inspectVisualComponentsInPage, inspectVisualLayoutInPage, visualPageExpression, VISUAL_STYLE_PROPS } from "../src/visual.js";
 
-test("visual_inspect delegates only to the existing page and screenshot targets a locator", async () => {
+test("visual_inspect delegates to the page and target screenshot clips without relocating the pointer", async () => {
   const runtime = new BrowserRuntime() as any;
   const calls: unknown[] = [];
+  const visualState = {
+    rect: { x: 20, y: 30, width: 50, height: 20 }, viewport: { width: 500, height: 300 },
+    hover: true, focus: false, focusWithin: false,
+    styles: { background: "red", shadow: "none", outlineStyle: "none", outlineWidth: "0px", outlineOffset: "0px" },
+  };
+  const viewportImage = new PNG({ width: 500, height: 300 });
+  viewportImage.data.fill(255);
   const page = {
     evaluate: async (callback: unknown, args: unknown) => {
       calls.push(["evaluate", typeof callback, args]);
       return { elements: [], matches: 0 };
     },
     locator: (selector: string) => ({
-      screenshot: async (options: object) => { calls.push(["locator", selector, options]); },
+      evaluate: async () => { calls.push(["locator.evaluate", selector]); return visualState; },
+      screenshot: async () => { throw new Error("locator.screenshot changes hover and must not be called"); },
     }),
+    screenshot: async (options: object) => {
+      calls.push(["page.screenshot", options]);
+      return PNG.sync.write(viewportImage);
+    },
   } as unknown as Page;
   const dir = await mkdtemp(path.join(os.tmpdir(), "visual-tools-test-"));
   const { config } = await import("../src/config.js");
@@ -34,10 +46,92 @@ test("visual_inspect delegates only to the existing page and screenshot targets 
     assert.equal((calls[0] as unknown[])[1], "string");
     assert.equal(output.artifact, path.join(dir, "sample-style.json"));
     assert.equal(JSON.parse(await readFile(output.artifact, "utf8")).matches, 0);
-    const shot = batchActionSchema.parse({ op: "screenshot", target: ".toolbar", name: "test-component" });
-    await runtime.runAction("p_001", page, shot, 2000);
-    assert.equal((calls[1] as unknown[])[0], "locator");
-    assert.equal((calls[1] as unknown[])[1], ".toolbar");
+    const shot = batchActionSchema.parse({ op: "screenshot", target: ".toolbar", name: "test-component", padding_px: 8 });
+    const captured = await runtime.runAction("p_001", page, shot, 2000);
+    assert.equal((calls[2] as unknown[])[0], "page.screenshot");
+    assert.equal(((calls[2] as unknown[])[1] as { clip?: object }).clip, undefined);
+    assert.deepEqual(captured.clip, { x: 12, y: 22, width: 66, height: 36 });
+    assert.equal(captured.padding_px, 8);
+    assert.equal(captured.padding_clipped, false);
+    const crop = PNG.sync.read(await readFile(captured.path));
+    assert.equal(crop.width, 66);
+    assert.equal(crop.height, 36);
+  } finally {
+    (config as any).artifactDir = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("target screenshot fails if element is offscreen or visual state changes", async () => {
+  const runtime = new BrowserRuntime() as any;
+  let current = { rect: { x: 5, y: 5, width: 30, height: 20 },
+    viewport: { width: 100, height: 100 }, hover: true, focus: false,
+    styles: { background: "red", shadow: "none", outlineStyle: "none", outlineWidth: "0px", outlineOffset: "0px" } };
+  const dir = await mkdtemp(path.join(os.tmpdir(), "visual-screenshot-test-"));
+  const { config } = await import("../src/config.js");
+  const original = config.artifactDir;
+  (config as any).artifactDir = dir;
+  const page = {
+    locator: () => ({ evaluate: async () => current }),
+    screenshot: async () => {
+      current = { ...current, hover: false };
+      return Buffer.alloc(0);
+    },
+  } as unknown as Page;
+  try {
+    await assert.rejects(() => runtime.runAction("p_001", page,
+      batchActionSchema.parse({ op: "screenshot", target: "#button", name: "changed" }), 1000),
+    /state changed/);
+    await assert.rejects(() => readFile(path.join(dir, "changed.png")));
+    current = { ...current, rect: { x: -1, y: 5, width: 30, height: 20 } };
+    await assert.rejects(() => runtime.runAction("p_001", page,
+      batchActionSchema.parse({ op: "screenshot", target: "#button" }), 1000),
+    /entire element/);
+  } finally {
+    (config as any).artifactDir = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("target screenshot warns when outline/shadow exceed padding and detects transient pixels when enabled", async () => {
+  const runtime = new BrowserRuntime() as any;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "visual-stability-test-"));
+  const { config } = await import("../src/config.js");
+  const original = config.artifactDir;
+  (config as any).artifactDir = dir;
+  const base = new PNG({ width: 100, height: 100 });
+  base.data.fill(255);
+  const changed = new PNG({ width: 100, height: 100 });
+  base.data.copy(changed.data);
+  changed.data.set([0, 0, 0, 255], (41 * 100 + 41) * 4);
+  let shotCount = 0;
+  const page = {
+    locator: () => ({
+      evaluate: async () => ({
+        rect: { x: 40, y: 40, width: 20, height: 20 },
+        viewport: { width: 100, height: 100 }, hover: false, focus: true,
+        styles: {
+          background: "white", shadow: "rgb(168, 85, 247) 0px 0px 0px 8px",
+          outlineStyle: "solid", outlineWidth: "3px", outlineOffset: "3px",
+        },
+      }),
+    }),
+    screenshot: async () => PNG.sync.write((++shotCount % 2) === 1 ? base : changed),
+  } as unknown as Page;
+  try {
+    const insufficient = await runtime.runAction("p_001", page,
+      batchActionSchema.parse({ op: "screenshot", target: "#focus", name: "tight", padding_px: 0, stability_check: true }), 2000);
+    assert.equal(insufficient.padding_clipped, false);
+    assert.equal(insufficient.recommended_padding_px, 8);
+    assert.equal(insufficient.effects_may_be_clipped, true);
+    assert.equal(insufficient.stability.stable, false);
+    assert.equal(insufficient.stability.mismatched_pixels, 1);
+    assert.equal(insufficient.warnings.length, 2);
+    const roomy = await runtime.runAction("p_001", page,
+      batchActionSchema.parse({ op: "screenshot", target: "#focus", name: "roomy", padding_px: 12 }), 2000);
+    assert.equal(roomy.effects_may_be_clipped, false);
+    assert.equal(roomy.stability, undefined);
+    assert.equal(roomy.warnings, undefined);
   } finally {
     (config as any).artifactDir = original;
     await rm(dir, { recursive: true, force: true });
@@ -96,11 +190,16 @@ test("tsx-serialized visual callbacks execute in a page-like context without lea
   assert.equal(data.url, "https://example.test/sheet");
 });
 
+test("component inspection includes align-self and outline-offset", () => {
+  assert.ok(VISUAL_STYLE_PROPS.includes("align-self"));
+  assert.ok(VISUAL_STYLE_PROPS.includes("outline-offset"));
+});
+
 test("layout extraction limits DOM scanning and marks depth truncation", () => {
   let styleReads = 0;
   const leaf = {
     tagName: "DIV", id: "", classList: [], childNodes: [], children: [],
-    getBoundingClientRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+    getBoundingClientRect: () => ({ x: 0.25, y: 1.5, width: 1.75, height: 2.25 }),
     getClientRects: () => [1], scrollHeight: 0, clientHeight: 0, scrollTop: 0, scrollLeft: 0,
   };
   const root = { ...leaf, children: Array.from({ length: 10_000 }, () => leaf) };
@@ -110,7 +209,8 @@ test("layout extraction limits DOM scanning and marks depth truncation", () => {
     Node: { TEXT_NODE: 3 },
     getComputedStyle: () => {
       styleReads++;
-      return { display: "block", visibility: "visible", getPropertyValue: () => "block" };
+      return { display: "block", visibility: "visible",
+        getPropertyValue: (name: string) => name === "align-items" ? "normal" : name === "overflow" ? "auto" : "block" };
     },
   };
   const single = runInNewContext(visualPageExpression(inspectVisualLayoutInPage,
@@ -118,9 +218,49 @@ test("layout extraction limits DOM scanning and marks depth truncation", () => {
   assert.equal(single.nodes, 1);
   assert.equal(single.truncated, true);
   assert.equal(styleReads, 1);
+  assert.equal(single.root.bounds.x, 0.25);
+  assert.equal(single.root.bounds.height, 2.25);
+  assert.equal(single.root.styles["align-items"], "normal");
+  assert.equal(single.root.styles.overflow, "auto");
   const shallow = runInNewContext(visualPageExpression(inspectVisualLayoutInPage,
     { selector: "main", maxDepth: 0, maxNodes: 10, includeText: false }), context);
   assert.equal(shallow.truncated, true);
+});
+
+test("layout JSON comparison detects Grid columns, gaps, scroll, bounds and missing nodes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "visual-layout-compare-test-"));
+  try {
+    const image = new PNG({ width: 3, height: 3 });
+    image.data.fill(255);
+    const png = path.join(dir, "same.png");
+    const before = path.join(dir, "before.json"), after = path.join(dir, "after.json");
+    await writeFile(png, PNG.sync.write(image));
+    await writeFile(before, JSON.stringify({ kind: "layout", root: {
+      tag: "div", id: "grid", bounds: { x: 0.5, width: 400 },
+      styles: { gap: "12px", "grid-template-columns": "160px 228px" },
+      scroll: { y: 0 }, children: [{ tag: "div", bounds: { x: 172 }, styles: {} }],
+    } }));
+    await writeFile(after, JSON.stringify({ kind: "layout", root: {
+      tag: "div", id: "grid", bounds: { x: 0.5, width: 400 },
+      styles: { gap: "15px", "grid-template-columns": "163px 222px" },
+      scroll: { y: 40 }, children: [],
+    } }));
+    const args = [path.resolve("scripts/visual-compare.mjs"),
+      "--reference", png, "--target", png, "--reference-json", before, "--target-json", after,
+      "--output", path.join(dir, "diff.png")];
+    const report = JSON.parse(execFileSync(process.execPath, args, { encoding: "utf8" }));
+    assert.equal(report.comparisonKind, "layout");
+    assert.equal(report.mismatchedPixels, 0);
+    assert.deepEqual(report.layoutDifferences[0].styles.gap, ["12px", "15px"]);
+    assert.deepEqual(report.layoutDifferences[0].scroll.y, [0, 40]);
+    assert.equal(report.layoutDifferences[1].type, "missing-target");
+    assert.deepEqual(report.matchingWarnings, []);
+    await writeFile(after, JSON.stringify({ kind: "components", elements: [] }));
+    assert.throws(() => execFileSync(process.execPath, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+      /Command failed/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("visual inspection timeout blocks context reset until CDP cleanup and prevents JSON write", async () => {
@@ -190,6 +330,36 @@ test("component JSON reports missing entries and pseudo-element changes", async 
     assert.equal(result.componentDifferences.length, 2);
     assert.equal(result.componentDifferences[1].type, "missing-target");
     assert.ok(result.componentDifferences[0].pseudo["::before"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("component comparisons expose identity differences and warn about positional mismatch", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "visual-identity-test-"));
+  try {
+    const png = new PNG({ width: 2, height: 2 });
+    png.data.fill(255);
+    const image = path.join(dir, "same.png");
+    const before = path.join(dir, "before.json"), after = path.join(dir, "after.json");
+    await writeFile(image, PNG.sync.write(png));
+    await writeFile(before, JSON.stringify({ kind: "components", elements: [
+      { tag: "button", id: "first", bounds: {}, styles: {} },
+      { tag: "button", id: "second", bounds: {}, styles: {} },
+    ] }));
+    await writeFile(after, JSON.stringify({ kind: "components", elements: [
+      { tag: "button", id: "second", bounds: {}, styles: {} },
+      { tag: "button", id: "first", bounds: {}, styles: {} },
+    ] }));
+    const report = JSON.parse(execFileSync(process.execPath, [
+      path.resolve("scripts/visual-compare.mjs"),
+      "--reference", image, "--target", image, "--reference-json", before, "--target-json", after,
+      "--output", path.join(dir, "diff.png"),
+    ], { encoding: "utf8" }));
+    assert.equal(report.componentDifferences.length, 2);
+    assert.deepEqual(report.componentDifferences[0].identity.id, ["first", "second"]);
+    assert.equal(report.matchingWarnings.length, 2);
+    assert.equal(report.mismatchedPixels, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
