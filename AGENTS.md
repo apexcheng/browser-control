@@ -30,5 +30,6 @@ Agent -> platform browser MCP -> browser-control Runtime Policy -> Playwright ->
 - Runtime lifecycle mutations must not race an active batch on the affected page/context. Do not reset context/hard, close the active page, or shut down the runtime while a `browser_batch` is still executing; serialize lifecycle operations with in-flight browser work.
 - Runtime validation should assert observable semantics, not incidental implementation details: verify timeout plus subsequent recovery rather than exact error wording, verify the dedicated owner/browser rather than helper-process counts, and verify reset/profile/page identity behavior rather than requiring specific PID changes.
 - Do not add business-system-specific behavior to the core.
+- For cross-SaaS UI visual comparisons, read `skills/saas-ui-visual-analysis/SKILL.md`; use `visual_inspect` and element `screenshot` through the existing `browser_batch`, then run the offline Pixelmatch CLI. Do not start PicassoWeb's browser or MCP.
 - `browser-agent`, Playwright CLI fallback, compatibility shims, and alternate Chrome runtimes are explicitly out of scope.
 

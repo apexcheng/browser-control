@@ -39,7 +39,20 @@ const evaluateAction = z.object({ op: z.literal("evaluate"), expression: z.strin
 const screenshotAction = z.object({
   op: z.literal("screenshot"),
   full_page: z.boolean().default(false),
+  target: locatorSpecSchema.optional(),
   name: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/).optional(),
+  timeout_ms: timeoutMs,
+});
+const visualInspectAction = z.object({
+  op: z.literal("visual_inspect"),
+  mode: z.enum(["components", "layout"]).default("components"),
+  selector: z.string().min(1).max(500),
+  name: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/).optional(),
+  max_matches: z.number().int().min(1).max(20).default(6),
+  max_depth: z.number().int().min(0).max(8).default(3),
+  max_nodes: z.number().int().min(1).max(300).default(80),
+  include_platform_fonts: z.boolean().default(false),
+  include_text: z.boolean().default(false),
   timeout_ms: timeoutMs,
 });
 const clipboardAction = z.object({
@@ -88,6 +101,7 @@ const websocketLogAction = z.object({
 export const batchActionSchema = z.discriminatedUnion("op", [
   gotoAction, clickAction, dblclickAction, fillAction, pressAction, hoverAction, dragAction,
   waitForAction, textAction, attrAction, countAction, evaluateAction, screenshotAction,
+  visualInspectAction,
   dialogAction, waitResponseAction, networkLogAction, downloadAction, websocketLogAction, clipboardAction,
 ]);
 

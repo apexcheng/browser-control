@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from "playwright";
@@ -9,6 +9,7 @@ import { config } from "./config.js";
 import { Diagnostics } from "./diagnostics.js";
 import { PageRegistry } from "./pages.js";
 import type { BatchAction, LocatorSpec, TriggerAction } from "./schema.js";
+import { inspectVisualComponentsInPage, inspectVisualLayoutInPage, VISUAL_STYLE_PROPS, visualPageExpression } from "./visual.js";
 
 const execFileAsync = promisify(execFile);
 const ownerFile = path.join(config.runtimeDir, "owner.json");
@@ -39,6 +40,9 @@ export class BrowserRuntime {
   private readonly pages = new PageRegistry();
   private readonly diagnostics = new Diagnostics();
   private readonly busyPages = new Set<string>();
+  // A timed-out page.evaluate/CDP call can continue after Promise.race rejects.
+  // Block all lifecycle mutations until its underlying work actually settles.
+  private readonly pendingVisualActions = new Map<string, Promise<unknown>>();
   private readonly mutatingPages = new Set<string>();
   private contextMutation = false;
   private activeOperations = 0;
@@ -212,11 +216,26 @@ export class BrowserRuntime {
       const timeout = Math.min(action.timeout_ms ?? defaultActionTimeout, remaining);
       const started = performance.now();
       try {
-        const value = await withTimeout(
-          this.runAction(selected.id, selected.page, action, timeout),
-          timeout,
-          `${action.op} timed out after ${timeout}ms`,
-        );
+        let value: unknown;
+        if (action.op === "visual_inspect") {
+          const controller = new AbortController();
+          const pending = this.runAction(selected.id, selected.page, action, timeout, controller.signal);
+          this.pendingVisualActions.set(selected.id, pending);
+          void pending.finally(() => {
+            if (this.pendingVisualActions.get(selected.id) === pending) this.pendingVisualActions.delete(selected.id);
+          }).catch(() => undefined);
+          try {
+            value = await withTimeout(pending, timeout, `visual_inspect timed out after ${timeout}ms`);
+          } catch (error) {
+            controller.abort();
+            throw error;
+          }
+        } else {
+          value = await withTimeout(
+            this.runAction(selected.id, selected.page, action, timeout),
+            timeout, `${action.op} timed out after ${timeout}ms`,
+          );
+        }
         results.push({
           index,
           op: action.op,
@@ -233,7 +252,7 @@ export class BrowserRuntime {
           duration_ms: round(performance.now() - started),
           error: errorText(error),
         });
-        if (input.stop_on_error !== false) break;
+        if (input.stop_on_error !== false || this.pendingVisualActions.has(selected.id)) break;
       }
     }
 
@@ -329,7 +348,7 @@ export class BrowserRuntime {
     const activityAt = this.lastActivityAt;
     const generation = this.activityGeneration;
     if (!context || this.activeOperations > 0 || this.launching || this.contextMutation
-      || this.busyPages.size > 0 || this.mutatingPages.size > 0
+      || this.busyPages.size > 0 || this.mutatingPages.size > 0 || this.pendingVisualActions.size > 0
       || Date.now() - activityAt < this.idleTimeoutMs) return;
 
     const pages = context.pages();
@@ -367,6 +386,7 @@ export class BrowserRuntime {
 
   private beginBatch(pageId: string) {
     this.assertNoContextMutation();
+    if (this.pendingVisualActions.has(pageId)) throw new Error(`Page ${pageId} is finishing a previous visual inspection`);
     if (this.mutatingPages.has(pageId)) throw new Error(`Page ${pageId} is undergoing a lifecycle operation`);
     if (this.busyPages.has(pageId)) throw new Error(`Page ${pageId} is already running another browser_batch`);
     this.busyPages.add(pageId);
@@ -374,6 +394,7 @@ export class BrowserRuntime {
 
   private beginPageMutation(pageId: string) {
     this.assertNoContextMutation();
+    if (this.pendingVisualActions.has(pageId)) throw new Error(`Page ${pageId} is finishing a previous visual inspection`);
     if (this.busyPages.has(pageId)) throw new Error(`Page ${pageId} is running browser_batch`);
     if (this.mutatingPages.has(pageId)) throw new Error(`Page ${pageId} is already undergoing a lifecycle operation`);
     this.mutatingPages.add(pageId);
@@ -382,6 +403,7 @@ export class BrowserRuntime {
   private beginContextMutation(operation: string) {
     if (this.contextMutation) throw new Error(`Cannot ${operation}: another browser context lifecycle operation is in progress`);
     if (this.busyPages.size > 0) throw new Error(`Cannot ${operation} while browser_batch is running`);
+    if (this.pendingVisualActions.size > 0) throw new Error(`Cannot ${operation} while visual inspection is finishing`);
     if (this.mutatingPages.size > 0) throw new Error(`Cannot ${operation} while a page lifecycle operation is running`);
     this.contextMutation = true;
   }
@@ -465,7 +487,7 @@ export class BrowserRuntime {
     }
   }
 
-  private async runAction(pageId: string, page: Page, action: BatchAction, timeout: number): Promise<unknown> {
+  private async runAction(pageId: string, page: Page, action: BatchAction, timeout: number, signal?: AbortSignal): Promise<unknown> {
     switch (action.op) {
       case "goto": {
         const response = await page.goto(action.url, { waitUntil: action.wait_until, timeout });
@@ -502,7 +524,23 @@ export class BrowserRuntime {
       case "evaluate":
         return page.evaluate(action.expression);
       case "screenshot":
-        return this.captureScreenshot(page, action.name, action.full_page, timeout);
+        return this.captureScreenshot(page, action.name, action.full_page, timeout, action.target);
+      case "visual_inspect": {
+        const deadline = Date.now() + timeout;
+        const ensureActive = () => {
+          if (signal?.aborted || Date.now() >= deadline) throw new Error("Visual inspection timed out or cancelled");
+        };
+        const result = await this.visualInspect(page, action, ensureActive);
+        ensureActive();
+        if (!action.name) return result;
+        const name = action.name.endsWith(".json") ? action.name : `${action.name}.json`;
+        const filepath = path.join(config.artifactDir, name);
+        await mkdir(config.artifactDir, { recursive: true });
+        ensureActive();
+        await writeFile(filepath, JSON.stringify(result, null, 2));
+        await this.pruneArtifacts();
+        return { ...result, artifact: filepath };
+      }
       case "clipboard":
         if (action.action === "read") return this.clipboardRead(action.mode, pageId, action.grant_permission);
         return this.clipboardWrite(action.mode, action.text!, pageId, action.grant_permission);
@@ -521,6 +559,57 @@ export class BrowserRuntime {
 
   private runTrigger(pageId: string, page: Page, action: TriggerAction, timeout: number) {
     return this.runAction(pageId, page, action as BatchAction, timeout);
+  }
+
+  private async visualInspect(page: Page, action: Extract<BatchAction, { op: "visual_inspect" }>, ensureActive: () => void) {
+    ensureActive();
+    if (action.mode === "layout") {
+      const layout = await page.evaluate(visualPageExpression(inspectVisualLayoutInPage, {
+        selector: action.selector, maxDepth: action.max_depth, maxNodes: action.max_nodes,
+        includeText: action.include_text,
+      })) as ReturnType<typeof inspectVisualLayoutInPage>;
+      ensureActive();
+      return layout;
+    }
+    const output = await page.evaluate(visualPageExpression(inspectVisualComponentsInPage, {
+      selector: action.selector, maxMatches: action.max_matches, properties: VISUAL_STYLE_PROPS,
+      includeText: action.include_text,
+    })) as ReturnType<typeof inspectVisualComponentsInPage>;
+    ensureActive();
+    if (!action.include_platform_fonts || !output.elements.length) return output;
+    // Reuse the *existing* Chrome context's CDP session, not another browser.
+    const cdp = await page.context().newCDPSession(page);
+    const warnings: string[] = [];
+    try {
+      ensureActive();
+      await cdp.send("DOM.enable");
+      ensureActive();
+      await cdp.send("CSS.enable");
+      ensureActive();
+      const { root } = await cdp.send("DOM.getDocument", { depth: 1 });
+      ensureActive();
+      const { nodeIds } = await cdp.send("DOM.querySelectorAll", { nodeId: root.nodeId, selector: action.selector });
+      for (let i = 0; i < Math.min(nodeIds.length, output.elements.length); i++) {
+        ensureActive();
+        try {
+          const { fonts } = await cdp.send("CSS.getPlatformFontsForNode", { nodeId: nodeIds[i]! });
+          ensureActive();
+          Object.assign(output.elements[i]!, {
+            platformFonts: fonts.map((font) => ({
+              family: font.familyName, custom: font.isCustomFont, glyphCount: font.glyphCount,
+            })),
+          });
+        } catch (error) {
+          warnings.push(`Font inspection ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    } catch (error) {
+      warnings.push(`CDP font inspection unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await cdp.detach().catch(() => undefined);
+    }
+    ensureActive();
+    return { ...output, ...(warnings.length ? { warnings } : {}) };
   }
 
   private async runDialog(
@@ -644,11 +733,14 @@ export class BrowserRuntime {
     return details;
   }
 
-  private async captureScreenshot(page: Page, name?: string, fullPage = false, timeout = config.actionTimeoutMs) {
+  private async captureScreenshot(
+    page: Page, name?: string, fullPage = false, timeout = config.actionTimeoutMs, target?: LocatorSpec,
+  ) {
     await mkdir(config.artifactDir, { recursive: true });
     const filename = name ?? `shot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
     const filepath = path.join(config.artifactDir, filename.endsWith(".png") ? filename : `${filename}.png`);
-    await page.screenshot({ path: filepath, fullPage, timeout });
+    if (target) await this.locator(page, target).screenshot({ path: filepath, timeout });
+    else await page.screenshot({ path: filepath, fullPage, timeout });
     await this.pruneArtifacts();
     return { path: filepath };
   }
