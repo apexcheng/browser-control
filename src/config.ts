@@ -4,8 +4,14 @@ import path from "node:path";
 const idleTimeoutMs = Number(process.env.BROWSER_CONTROL_IDLE_TIMEOUT_MS ?? 30 * 60_000);
 
 const rootDir = process.env.BROWSER_CONTROL_HOME ?? path.join(os.homedir(), "browser-control");
+const browserMode = process.env.BROWSER_CONTROL_MODE ?? "persistent";
+if (browserMode !== "persistent" && browserMode !== "cdp") {
+  throw new Error(`Invalid BROWSER_CONTROL_MODE: ${browserMode} (expected persistent or cdp)`);
+}
 
 export const config = {
+  browserMode,
+  cdpUrl: process.env.BROWSER_CONTROL_CDP_URL ?? "http://127.0.0.1:9222",
   host: process.env.BROWSER_CONTROL_HOST ?? "127.0.0.1",
   port: Number(process.env.BROWSER_CONTROL_PORT ?? 8766),
   rootDir,

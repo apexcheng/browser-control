@@ -64,6 +64,7 @@ export class BrowserRuntime {
       ok: true,
       running: Boolean(this.context),
       closing: Boolean(this.contextClosing),
+      browser_mode: config.browserMode,
       pid: process.pid,
       profile_dir: config.profileDir,
       runtime_dir: config.runtimeDir,
@@ -78,6 +79,9 @@ export class BrowserRuntime {
   }
 
   private async resetOperation(level: "soft" | "page" | "context" | "hard", pageRef?: string) {
+    if (config.browserMode === "cdp" && (level === "context" || level === "hard")) {
+      throw new Error(`browser_reset(${level}) is not supported in CDP mode: the attached Chrome must not be restarted or closed`);
+    }
     if (level === "soft") {
       if (!this.context) return { ok: true, level, running: false };
       this.pages.reconcile(this.context.pages());
@@ -327,7 +331,7 @@ export class BrowserRuntime {
 
   private scheduleIdleCheck() {
     this.clearIdleTimer();
-    if (!(this.idleTimeoutMs > 0) || this.shuttingDown || !this.context
+    if (config.browserMode === "cdp" || !(this.idleTimeoutMs > 0) || this.shuttingDown || !this.context
       || this.activeOperations > 0 || this.idleRecycling) return;
     const remaining = Math.max(1, this.idleTimeoutMs - (Date.now() - this.lastActivityAt));
     this.idleTimer = setTimeout(() => {
@@ -421,20 +425,35 @@ export class BrowserRuntime {
   }
 
   private async launch() {
-    await mkdir(config.profileDir, { recursive: true });
+    if (config.browserMode === "persistent") await mkdir(config.profileDir, { recursive: true });
     await mkdir(config.runtimeDir, { recursive: true });
     await mkdir(config.artifactDir, { recursive: true });
     await this.acquireOwner();
 
     try {
-      const context = await chromium.launchPersistentContext(config.profileDir, {
-        channel: config.channel,
-        chromiumSandbox: true,
-        headless: config.headless,
-        viewport: null,
-        acceptDownloads: true,
-        args: ["--no-first-run", "--no-default-browser-check"],
-      });
+      let context: BrowserContext;
+      if (config.browserMode === "cdp") {
+        const browser = await chromium.connectOverCDP(config.cdpUrl, { timeout: 10_000 });
+        const existingContext = browser.contexts()[0];
+        if (!existingContext) throw new Error("CDP connection has no default Chrome context");
+        context = existingContext;
+        browser.once("disconnected", () => {
+          if (this.context !== context) return;
+          this.context = undefined;
+          this.pages.reset();
+          this.diagnostics.reset();
+          void this.releaseOwner();
+        });
+      } else {
+        context = await chromium.launchPersistentContext(config.profileDir, {
+          channel: config.channel,
+          chromiumSandbox: true,
+          headless: config.headless,
+          viewport: null,
+          acceptDownloads: true,
+          args: ["--no-first-run", "--no-default-browser-check"],
+        });
+      }
       context.setDefaultTimeout(config.actionTimeoutMs);
       context.setDefaultNavigationTimeout(config.navigationTimeoutMs);
       this.context = context;
@@ -444,7 +463,8 @@ export class BrowserRuntime {
       for (const page of context.pages()) this.attachPage(page);
       context.on("page", (page) => this.attachPage(page));
       context.once("close", () => {
-        if (this.context === context) this.context = undefined;
+        if (this.context !== context) return;
+        this.context = undefined;
         this.pages.reset();
         this.diagnostics.reset();
         void this.releaseOwner();
@@ -877,6 +897,12 @@ export class BrowserRuntime {
     this.context = undefined;
     this.pages.reset();
     this.diagnostics.reset();
+    // A CDP attachment is not the owner of the user's Chrome process or profile.
+    // Drop runtime references; never close its default context or kill Chrome.
+    if (config.browserMode === "cdp") {
+      await this.releaseOwner();
+      return;
+    }
     if (context) {
       const closing = context.close().then(() => this.releaseOwner()).finally(() => {
         if (this.contextClosing === closing) this.contextClosing = undefined;
