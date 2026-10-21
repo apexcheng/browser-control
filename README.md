@@ -11,7 +11,7 @@ Agent
   -> platform browser MCP (browser-control runtime, Streamable HTTP)
   -> thin Runtime Policy Layer
   -> Playwright native API
-  -> dedicated Google Chrome persistent context (default)
+  -> dedicated Google Chrome persistent context
 ```
 
 Runtime defaults:
@@ -21,39 +21,7 @@ Runtime defaults:
 - Runtime state: `~/browser-control/runtime`
 - Artifacts: `~/browser-control/artifacts`
 
-There is no browser-agent fallback, Playwright CLI path, automatic CDP reconnect loop, internal daemon, or arbitrary Node execution.
-
-## Optional existing-Chrome CDP mode
-
-The default `BROWSER_CONTROL_MODE=persistent` retains the dedicated profile and
-`launchPersistentContext` behavior. To **opt in** to an already-running local
-Chrome with remote debugging enabled, set these in the browser-control **service
-environment** and restart the controller at a safe task boundary:
-
-```bash
-BROWSER_CONTROL_MODE=cdp
-BROWSER_CONTROL_CDP_URL=http://127.0.0.1:9222
-```
-
-CDP mode uses Playwright `connectOverCDP()` and the same MCP tools, Skill,
-page registry, diagnostics and `browser_batch`; no Chrome DevTools MCP is needed.
-It does not launch Chrome or access the dedicated profile. If the connection fails,
-the error is reported directly (no fallback). `browser_status.browser_mode` shows
-the selected startup mode.
-
-For **Chrome 144+ already running with the normal profile**, open
-`chrome://inspect/#remote-debugging` and enable remote debugging. When the
-controller connects, approve the connection in Chrome. The controller reads
-Chrome's local `DevToolsActivePort` file to find the approval-gated WebSocket;
-the HTTP `/json/version` endpoint returning 404 is expected in this mode.
-Explicit `ws://` endpoints and Chrome instances started with an ordinary CDP
-HTTP debugging port continue to work unchanged. No Chrome restart is required.
-
-**Safety boundary:** CDP mode never closes/restarts Chrome, removes Chrome profile
-locks, or recycles the browser on idle. `browser_reset` levels `context` and `hard`
-are unavailable in CDP mode; `soft` and `page` remain available. Closing a page
-via the explicit `page_close` tool still closes that tab. Stopping the controller
-does not stop the attached Chrome. Keep the Chrome debug port bound to loopback.
+There is no browser-agent fallback, Playwright CLI path, CDP reconnect loop, internal daemon, or arbitrary Node execution.
 
 ## MCP tools
 

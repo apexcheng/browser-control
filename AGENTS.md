@@ -13,9 +13,8 @@ Agent -> platform browser MCP -> browser-control Runtime Policy -> Playwright ->
 ```
 
 - Playwright owns generic browser behavior. Do not mirror the Playwright API or Playwright MCP tool surface.
-- By default, the runtime owns one persistent Google Chrome context using `~/browser-control/chrome-profile`.
-- Default to Playwright `launchPersistentContext`. Only explicit `BROWSER_CONTROL_MODE=cdp` may attach to an existing Chrome via `connectOverCDP`; do not add automatic CDP reconnect, fallback, or a second daemon.
-- In CDP mode, never close or kill Chrome, clean its profile, or run context/hard resets; no idle recycling of the attached browser.
+- The runtime owns exactly one persistent Google Chrome context using `~/browser-control/chrome-profile`.
+- Launch Chrome through Playwright `launchPersistentContext`; do not add a CDP reconnect path or a second daemon.
 - Browser startup is lazy. Do not expose start/stop tools just for symmetry.
 - Keep the Playwright context in memory and reuse it across actions and MCP sessions.
 - Use stable page ids / aliases; never expose tab index as durable identity.
