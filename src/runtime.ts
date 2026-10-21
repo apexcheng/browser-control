@@ -7,6 +7,7 @@ import { chromium, type BrowserContext, type Locator, type Page, type Response }
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 import { readSystemClipboard, writeSystemClipboard } from "./clipboard.js";
+import { resolveCdpEndpoint } from "./cdp.js";
 import { config } from "./config.js";
 import { Diagnostics } from "./diagnostics.js";
 import { PageRegistry } from "./pages.js";
@@ -433,7 +434,10 @@ export class BrowserRuntime {
     try {
       let context: BrowserContext;
       if (config.browserMode === "cdp") {
-        const browser = await chromium.connectOverCDP(config.cdpUrl, { timeout: 10_000 });
+        const endpoint = await resolveCdpEndpoint(config.cdpUrl);
+        const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 }).catch((error) => {
+          throw new Error(`Cannot attach to Chrome via CDP. For a normal Chrome session, enable remote debugging at chrome://inspect/#remote-debugging and approve the connection prompt. ${errorText(error)}`);
+        });
         const existingContext = browser.contexts()[0];
         if (!existingContext) throw new Error("CDP connection has no default Chrome context");
         context = existingContext;

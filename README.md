@@ -41,6 +41,14 @@ It does not launch Chrome or access the dedicated profile. If the connection fai
 the error is reported directly (no fallback). `browser_status.browser_mode` shows
 the selected startup mode.
 
+For **Chrome 144+ already running with the normal profile**, open
+`chrome://inspect/#remote-debugging` and enable remote debugging. When the
+controller connects, approve the connection in Chrome. The controller reads
+Chrome's local `DevToolsActivePort` file to find the approval-gated WebSocket;
+the HTTP `/json/version` endpoint returning 404 is expected in this mode.
+Explicit `ws://` endpoints and Chrome instances started with an ordinary CDP
+HTTP debugging port continue to work unchanged. No Chrome restart is required.
+
 **Safety boundary:** CDP mode never closes/restarts Chrome, removes Chrome profile
 locks, or recycles the browser on idle. `browser_reset` levels `context` and `hard`
 are unavailable in CDP mode; `soft` and `page` remain available. Closing a page
